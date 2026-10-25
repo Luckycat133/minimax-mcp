@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "minimax-mcp": {
+      "command": "node",
+      "args": [
+        "/Users/jack/Documents/projects/minimax-mcp/mcp-server.js"
+      ],
+      "env": {
+        "MINIMAX_PYTHON": "python3",
+        "MINIMAX_SQLITE_BIN": "sqlite3"
+      }
+    }
+  }
+}
