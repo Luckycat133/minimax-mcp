@@ -74,6 +74,11 @@ const localTime = (ms) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
+const sleep = (ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* 同步等待 */ }
+};
+
 const clip = (s, n = 160) => {
   const t = (s || '').replace(/\s+/g, ' ').trim();
   return t.length > n ? `${t.slice(0, n)}…` : t;
@@ -262,6 +267,58 @@ function recentlyTouchedSessions(limit = 3) {
   }));
 }
 
+/**
+ * 等一个会话把当前这轮跑完，返回最终的助手回复。
+ * 判定"跑完"用两个信号：会话状态回到 idle，且最后一条 assistant 消息有正文。
+ * 这比数消息条数可靠——流式输出过程中会不断追加空 content 的工具调用消息。
+ */
+function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, intervalMs = 3000) {
+  const started = Date.now();
+  const deadline = started + timeoutSeconds * 1000;
+  let lastSeen = afterMessageId;
+  let best = null;
+
+  while (Date.now() < deadline) {
+    const row = one(
+      'select status from local_runtime_sessions where session_id = ?',
+      [sessionId]
+    );
+    const status = row?.status || null;
+
+    const msg = one(
+      "select id, role, created_at_ms, json_extract(data_json,'$.msg_content') as content "
+      + "from local_runtime_message_rows where session_id = ? and id > ? order by id desc limit 1",
+      [sessionId, lastSeen]
+    );
+    if (msg) {
+      lastSeen = Number(msg.id);
+      const text = (msg.content || '').trim();
+      if (msg.role === 'assistant' && text) best = { id: Number(msg.id), text };
+    }
+
+    // 状态回到 idle 且已经拿到正文 → 这一轮结束了
+    if (status === 'idle' && best) {
+      return {
+        done: true,
+        sessionId,
+        waitedSeconds: Math.round((Date.now() - started) / 1000),
+        lastAssistantMessageId: best.id,
+        result: best.text,
+      };
+    }
+    sleep(intervalMs);
+  }
+
+  return {
+    done: false,
+    sessionId,
+    waitedSeconds: Math.round((Date.now() - started) / 1000),
+    lastAssistantMessageId: best ? best.id : null,
+    result: best ? best.text : null,
+    note: '超时了还没回到 idle；结果可能是半成品',
+  };
+}
+
 /** 取当前最大消息 id，用于发送后判断有没有真的入库。 */
 function maxMessageId() {
   const row = one('select coalesce(max(id),0) as m from local_runtime_message_rows');
@@ -303,6 +360,7 @@ module.exports = {
   tasks,
   maxMessageId,
   waitForUserMessage,
+  waitForResult,
   localTime,
   clip,
 };

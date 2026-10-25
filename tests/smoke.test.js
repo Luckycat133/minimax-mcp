@@ -110,14 +110,32 @@ function main() {
     }
     record('preview 只读且放行', pvOk, pvDetail);
 
-    // 回归：有会话在活跃时，发送必须被守卫拒绝，且错误里要点名是哪些会话。
+    // 回归：守卫必须能拦住发送。
+    // 用 quietSeconds 设成极大值 + send:false —— 既保证一定触发守卫，
+    // 又保证即使守卫失效也绝不会真的发出任何东西（不会污染用户的会话）。
     const guarded = await send('tools/call', {
       name: 'minimax_send_message',
-      arguments: { message: '联调守卫测试', send: true },
+      arguments: { message: '联调守卫测试', send: false, quietSeconds: 999999 },
     });
     const gErr = guarded.result?.isError === true;
     const gText = guarded.result?.content?.[0]?.text || '';
     record('活跃守卫拦住发送', gErr && /已拒绝发送/.test(gText), gErr ? gText.slice(0, 110) : '竟然放行了');
+
+    // 回归：get_result 必须能在不改任何状态的情况下收回某个会话的最终回复。
+    const gr = await send('tools/call', {
+      name: 'minimax_get_result',
+      arguments: { timeoutSeconds: 3 },
+    });
+    let grOk = gr.result?.isError !== true;
+    let grDetail = '';
+    if (grOk) {
+      const parsed = JSON.parse(gr.result.content[0].text);
+      grOk = typeof parsed.sessionId === 'string' && typeof parsed.done === 'boolean';
+      grDetail = `session=${parsed.sessionId?.slice(0, 14)} done=${parsed.done}`;
+    } else {
+      grDetail = gr.result?.content?.[0]?.text?.slice(0, 100) || 'error';
+    }
+    record('get_result 可收回结果', grOk, grDetail);
 
     const failed = results.filter((r) => !r.pass).length;
     console.log(`\n${results.length - failed}/${results.length} 通过`);

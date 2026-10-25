@@ -162,6 +162,27 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'minimax_get_result',
+    description:
+      '等某个会话把当前这轮跑完，返回最终回复。发给 minimax_send_message 之后用它收结果，' +
+      '不用自己轮询。判定"跑完"的依據是会话状态回到 idle 且最后一条助手消息有正文。' +
+      '超时也会返回，但 result 可能是半成品（done:false）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: '会话 ID；省略则用最近活跃的会话' },
+        afterMessageId: { type: 'integer', minimum: 0, default: 0, description: '从这条消息之后开始找，通常传 minimax_send_message 返回的 messageId' },
+        timeoutSeconds: { type: 'integer', minimum: 1, maximum: 3600, default: 300 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minimax_stop_generation',
+    description: '让 MiniMax 停止当前这轮生成（按 Esc）。只发按键，不点任何按钮，可逆。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
 ];
 
 const TOOL_NAMES = TOOLS.map((t) => t.name);

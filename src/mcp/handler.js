@@ -214,6 +214,24 @@ function callTool(name, args = {}) {
         return ok(gui.typeText(args.text));
       }
 
+      case 'minimax_get_result': {
+        let sid = args.sessionId ? db.resolveSession(args.sessionId) : null;
+        if (!sid) {
+          const recent = db.recentlyTouchedSessions(1)[0] || db.listSessions(1)[0];
+          if (!recent) return fail('找不到会话');
+          sid = recent.sessionId;
+        }
+        const after = Number(args.afterMessageId || 0);
+        const timeout = Number(args.timeoutSeconds || 300);
+        return ok(db.waitForResult(sid, after, timeout));
+      }
+
+      case 'minimax_stop_generation': {
+        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+        gui.pressKey('escape');
+        return ok({ stopped: true, via: 'escape' });
+      }
+
       case 'minimax_key': {
         if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
         return ok(gui.pressKey(args.key, args.modifiers || []));

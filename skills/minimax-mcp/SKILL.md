@@ -71,6 +71,21 @@ node scripts/call.js minimax_send_message '{"message":"…","send":true}' --dry-
 `layout: "newtask"` 是新建任务页中部那个大输入框。窗口位置每次都可能变，
 推算不准就 `minimax_windows` 看几何，再显式给 `at`。
 
+## 收结果
+
+发出去之后用它收，不用自己轮询：
+
+```
+minimax_send_message {message: "…", send: true, force: true}   # 先发，记下 messageId
+minimax_get_result {afterMessageId: 13278, timeoutSeconds: 300} # 等这轮跑完，拿最终回复
+```
+
+判定"跑完"的依据是**会话状态回到 idle 且最后一条助手消息有正文**，不是数消息条数——
+流式输出过程中会不断追加空 content 的工具调用消息，数条数会误判。超时也会返回，
+但 `done:false` 时 `result` 可能是半成品。
+
+要中断当前这轮：`minimax_stop_generation`（按 Esc，只发按键，不点按钮）。
+
 ## 点按钮
 
 MiniMax 没有可用的控件树，中文 OCR 也不可靠。所以点按钮的流程是：

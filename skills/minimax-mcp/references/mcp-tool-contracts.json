@@ -143,6 +143,24 @@
       },
       "output": "key, modifiers",
       "sideEffects": "键盘"
+    },
+    {
+      "name": "minimax_get_result",
+      "intent": "等某会话跑完并收回最终回复",
+      "input": {
+        "sessionId": "可选，默认最近活跃",
+        "afterMessageId": "默认 0",
+        "timeoutSeconds": "默认 300"
+      },
+      "output": "done, sessionId, waitedSeconds, lastAssistantMessageId, result",
+      "sideEffects": "none（只读轮询）"
+    },
+    {
+      "name": "minimax_stop_generation",
+      "intent": "停止当前这轮生成",
+      "input": {},
+      "output": "stopped, via",
+      "sideEffects": "按 Esc 键"
     }
   ]
 }
