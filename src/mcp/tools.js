@@ -105,7 +105,9 @@ const TOOLS = [
     name: 'minimax_send_message',
     description:
       '往 MiniMax 当前打开的会话输入框粘贴一条指令。默认只输入不发送；send=true 才回车。' +
-      '发送后会轮询数据库确认消息真的入库，返回 ok 或 warn，不要只凭返回值判断。',
+      '发送后会轮询数据库确认消息真的入库，返回 ok 或 warn。' +
+      '带活跃守卫：当前会话不久前还在活动就拒绝发送（防止打扰你正在进行的对话），确认要发加 force:true。' +
+      'preview:true 只报告会发生什么，不点不粘不发。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -113,6 +115,9 @@ const TOOLS = [
         send: { type: 'boolean', default: false },
         at: { type: 'string', description: '输入框坐标 "x,y"，不传则按窗口自动推算' },
         layout: { type: 'string', enum: ['chat', 'newtask'], default: 'chat', description: 'chat=会话页底部输入框；newtask=新建任务页中部输入框' },
+        quietSeconds: { type: 'integer', minimum: 0, default: 300, description: '当前会话多久没活动才允许发送；0 表示不检查' },
+        force: { type: 'boolean', default: false, description: '跳过活跃守卫，确认要打扰正在进行的对话时用' },
+        preview: { type: 'boolean', default: false, description: '只预览不动作：报告目标坐标、遮挡情况、守卫状态' },
       },
       required: ['message'],
       additionalProperties: false,

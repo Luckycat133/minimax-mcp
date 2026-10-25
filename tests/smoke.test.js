@@ -76,6 +76,37 @@ function main() {
     const bad = await send('tools/call', { name: 'minimax_nope', arguments: {} });
     record('未知工具被拒绝', Boolean(bad.error), bad.error?.message);
 
+    // 回归：窗口/焦点窗口必须只属于 MiniMax，不能把宿主或别的 App 的窗口混进来。
+    // 曾经在这里栽过——按"当前活跃应用"取焦点窗口，结果拿到的是 MCP 宿主自己的窗口。
+    const wins = await send('tools/call', { name: 'minimax_windows', arguments: {} });
+    let winOk = wins.result?.isError !== true;
+    let detail = '';
+    if (winOk) {
+      const parsed = JSON.parse(wins.result.content[0].text);
+      const foreign = (parsed.windows || []).filter((w) => w.app !== 'MiniMax Code');
+      winOk = foreign.length === 0;
+      detail = foreign.length ? `混进了 ${foreign.map((f) => f.app).join(',')}` : `${parsed.onScreenCount} 个在屏窗口`;
+    } else {
+      detail = '工具报错';
+    }
+    record('窗口列表只含 MiniMax', winOk, detail);
+
+    // 回归：preview 是只读的，任何情况下都必须放行；且必须报告守卫状态。
+    const pv = await send('tools/call', {
+      name: 'minimax_send_message',
+      arguments: { message: 'x', preview: true },
+    });
+    let pvOk = pv.result?.isError !== true;
+    let pvDetail = '';
+    if (pvOk) {
+      const parsed = JSON.parse(pv.result.content[0].text);
+      pvOk = parsed.preview === true && typeof parsed.guard === 'object' && typeof parsed.inputAt === 'object';
+      pvDetail = `guard.busy=${parsed.guard?.busy}`;
+    } else {
+      pvDetail = pv.result?.content?.[0]?.text?.slice(0, 100) || 'error';
+    }
+    record('preview 只读且放行', pvOk, pvDetail);
+
     const failed = results.filter((r) => !r.pass).length;
     console.log(`\n${results.length - failed}/${results.length} 通过`);
     child.kill();

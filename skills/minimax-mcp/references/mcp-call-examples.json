@@ -4,43 +4,161 @@
     {
       "intent": "巡检所有会话的最新进展",
       "calls": [
-        { "method": "tools/call", "params": { "name": "minimax_tail_sessions", "arguments": { "count": 6, "perSession": 2 } } },
-        { "method": "tools/call", "params": { "name": "minimax_pending", "arguments": {} } },
-        { "method": "tools/call", "params": { "name": "minimax_tasks", "arguments": { "status": "running" } } }
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_tail_sessions",
+            "arguments": {
+              "count": 6,
+              "perSession": 2
+            }
+          }
+        },
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_pending",
+            "arguments": {}
+          }
+        },
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_tasks",
+            "arguments": {
+              "status": "running"
+            }
+          }
+        }
       ]
     },
     {
       "intent": "读某个会话的完整上下文",
       "calls": [
-        { "method": "tools/call", "params": { "name": "minimax_read_session", "arguments": { "session": "3", "limit": 30, "includeThinking": false } } }
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_read_session",
+            "arguments": {
+              "session": "3",
+              "limit": 30,
+              "includeThinking": false
+            }
+          }
+        }
       ]
     },
     {
       "intent": "往当前会话推一句话（先不发送）",
       "calls": [
-        { "method": "tools/call", "params": { "name": "minimax_send_message", "arguments": { "message": "继续，把剩下的跑完给我结论", "send": false } } }
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_send_message",
+            "arguments": {
+              "message": "继续，把剩下的跑完给我结论",
+              "send": false
+            }
+          }
+        }
       ]
+    },
+    {
+      "intent": "发送前先预览（只读，报告坐标/遮挡/守卫）",
+      "calls": [
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_send_message",
+            "arguments": {
+              "message": "…",
+              "send": true,
+              "preview": true
+            }
+          }
+        }
+      ],
+      "expect": "preview=true，含 inputAt / overlay / activeApp / guard；没有任何点击或输入"
     },
     {
       "intent": "发送并确认入库",
       "calls": [
-        { "method": "tools/call", "params": { "name": "minimax_send_message", "arguments": { "message": "继续，把剩下的跑完给我结论", "send": true, "layout": "chat" } } }
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_send_message",
+            "arguments": {
+              "message": "继续，把剩下的跑完给我结论",
+              "send": true,
+              "layout": "chat"
+            }
+          }
+        }
       ],
-      "expect": "verified=true 且带 sessionId/messageId；verified=false 表示没发出去"
+      "expect": "verified=true 且带 sessionId/messageId；verified=false 表示没发出去",
+      "note": "若当前会话不久前还在活动会被守卫拒绝；确认要发加 force:true，或调大 quietSeconds"
     },
     {
       "intent": "新建任务页输入（输入框在页面中部）",
       "calls": [
-        { "method": "tools/call", "params": { "name": "minimax_key", "arguments": { "key": "n", "modifiers": ["cmd"] } } },
-        { "method": "tools/call", "params": { "name": "minimax_send_message", "arguments": { "message": "任务内容", "send": true, "layout": "newtask" } } }
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_key",
+            "arguments": {
+              "key": "n",
+              "modifiers": [
+                "cmd"
+              ]
+            }
+          }
+        },
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_send_message",
+            "arguments": {
+              "message": "任务内容",
+              "send": true,
+              "layout": "newtask"
+            }
+          }
+        }
       ]
     },
     {
       "intent": "截图看界面，再按坐标点按钮",
       "calls": [
-        { "method": "tools/call", "params": { "name": "minimax_screenshot", "arguments": { "mode": "screen", "name": "check" } } },
-        { "method": "tools/call", "params": { "name": "minimax_click", "arguments": { "x": 678, "y": 597 } } },
-        { "method": "tools/call", "params": { "name": "minimax_screenshot", "arguments": { "mode": "screen", "name": "after" } } }
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_screenshot",
+            "arguments": {
+              "mode": "screen",
+              "name": "check"
+            }
+          }
+        },
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_click",
+            "arguments": {
+              "x": 678,
+              "y": 597
+            }
+          }
+        },
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_screenshot",
+            "arguments": {
+              "mode": "screen",
+              "name": "after"
+            }
+          }
+        }
       ]
     }
   ]

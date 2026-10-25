@@ -26,6 +26,8 @@ Retina 屏幕上截图是 2 倍像素，所以 像素坐标 / 2 = 点坐标。
 """
 import ctypes
 import ctypes.util
+import os
+import re
 import subprocess
 import sys
 import time
@@ -72,6 +74,18 @@ cg.CGEventCreateScrollWheelEvent.argtypes = [
 # 窗口列表
 cg.CGWindowListCopyWindowInfo.restype = ctypes.c_void_p
 cg.CGWindowListCopyWindowInfo.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+
+# 显示器（取 Retina 缩放用）
+cg.CGMainDisplayID.restype = ctypes.c_uint32
+cg.CGMainDisplayID.argtypes = []
+cg.CGDisplayBounds.restype = CGRect
+cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+cg.CGDisplayPixelsWide.restype = ctypes.c_size_t
+cg.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
+
+# 无障碍：AXValue 解包（取焦点窗口的位置和尺寸）
+ax.AXValueGetValue.restype = ctypes.c_bool
+ax.AXValueGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
 
 cf.CFArrayGetCount.restype = ctypes.c_long
 cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
@@ -261,8 +275,10 @@ WINDOW_KEYS = {
 }
 
 
-def list_windows(only_layer0=True):
-    arr = cg.CGWindowListCopyWindowInfo(1 | 16, 0)  # OnScreenOnly | ExcludeDesktopElements
+def list_windows(only_layer0=True, all_windows=False):
+    # kCGWindowListOptionAll=0（含不在屏上的）/ OnScreenOnly=1 / ExcludeDesktopElements=16
+    opts = 0 if all_windows else (1 | 16)
+    arr = cg.CGWindowListCopyWindowInfo(opts, 0)
     if not arr:
         return []
     out = []
@@ -304,6 +320,22 @@ def cmd_windows():
         print(f"{w.get('pid',0):>7}  {w.get('layer',0):>4}  {b:<28}  {name[:40]:<40} | {w.get('owner','')}")
 
 
+def cmd_windows_all():
+    """全部窗口（含不在屏上的）。
+
+    OnScreenOnly 拿不到被最小化、被隐藏或跑到别的 Space 的窗口——那种情况下
+    会误判成"App 没窗口"。排障时用这个。
+    """
+    wins = list_windows(all_windows=True)
+    print(f"{'PID':>7}  {'层级':>4}  {'在屏':>4}  {'位置/尺寸':<28}  窗口标题  |  所属应用")
+    print("-" * 118)
+    for w in wins:
+        b = f"{int(w.get('x',0))},{int(w.get('y',0))} {int(w.get('width',0))}x{int(w.get('height',0))}"
+        name = w.get("name") or "(无标题)"
+        on = "是" if w.get("onscreen") else "否"
+        print(f"{w.get('pid',0):>7}  {w.get('layer',0):>4}  {on:>4}  {b:<28}  {name[:40]:<40} | {w.get('owner','')}")
+
+
 def cmd_front():
     wins = list_windows()
     if not wins:
@@ -312,6 +344,38 @@ def cmd_front():
     w = wins[0]
     b = f"{int(w.get('x',0))},{int(w.get('y',0))} {int(w.get('width',0))}x{int(w.get('height',0))}"
     print(f"前台窗口: {w.get('owner','')} | {w.get('name') or '(无标题)'} | PID={w.get('pid')} | {b}")
+
+
+def cmd_active():
+    """当前「活跃应用」——即 ⌘Tab 的那个，也是键盘事件的去处。
+
+    不要用 list_windows()[0] 代替：浮动面板（NSPanel / always-on-top 小窗）会一直
+    躺在最上层，但它不是活跃应用。之前在这个判断上栽过：激活了 MiniMax，
+    却因为 ChatGPT 的 Computer Use Controls 悬浮在最上层而被误判成"没激活"。
+    """
+    try:
+        r = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=5)
+    except Exception as e:
+        print(f"取活跃应用失败: {e}")
+        return
+    m = re.match(r"\s*(ASN:0x[0-9a-f]+-0x[0-9a-f]+:)", r.stdout or "")
+    if not m:
+        print(f"解析 lsappinfo 失败: {(r.stdout or '').strip()}")
+        return
+    try:
+        info = subprocess.run(["lsappinfo", "info", m.group(1)],
+                              capture_output=True, text=True, timeout=5).stdout or ""
+    except Exception as e:
+        print(f"取应用信息失败: {e}")
+        return
+    name = re.search(r'^"([^"]+)"', info, re.M)
+    bundle = re.search(r'bundle path="([^"]+)"', info)
+    pid = re.search(r'\bpid = (\d+)', info)
+    if not (name and bundle):
+        print("解析应用信息失败")
+        return
+    app = os.path.basename(bundle.group(1)).replace(".app", "")
+    print(f"活跃应用: {app} | 原名={name.group(1)} | PID={pid.group(1) if pid else '?'} | {bundle.group(1)}")
 
 
 # ---------------- 截图 ----------------
@@ -440,6 +504,62 @@ def cmd_activate(pid):
     print("切换到前台:", "成功" if err == 0 else f"失败({err})")
 
 
+def cmd_focused_window(pid):
+    """某进程当前获得焦点的窗口（AXFocusedWindow）。
+
+    一个 App 可能同时开多个窗口（比如主窗口 + 新建任务页），
+    按键和输入去的是焦点窗口，不是面积最大的那个。算点击坐标前必须先用这个定位。
+    """
+    app = ax.AXUIElementCreateApplication(int(pid))
+    k = cfstr("AXFocusedWindow")
+    v = ctypes.c_void_p()
+    err = ax.AXUIElementCopyAttributeValue(app, k, ctypes.byref(v))
+    cf.CFRelease(k)
+    if err != 0 or not v.value:
+        print(f"取焦点窗口失败: err={err}")
+        return
+    pos = ax.AXValueCreate(ctypes.c_void_p(0)) if hasattr(ax, "AXValueCreate") else None
+    pk = cfstr("AXPosition")
+    pv = ctypes.c_void_p()
+    ax.AXUIElementCopyAttributeValue(v, pk, ctypes.byref(pv))
+    cf.CFRelease(pk)
+    sk = cfstr("AXSize")
+    sv = ctypes.c_void_p()
+    ax.AXUIElementCopyAttributeValue(v, sk, ctypes.byref(sv))
+    cf.CFRelease(sk)
+    x = y = w = h = 0
+    if pv.value:
+        pt = CGPoint()
+        if ax.AXValueGetValue(pv, 1, ctypes.byref(pt)):  # kAXValueCGPointType
+            x, y = pt.x, pt.y
+    if sv.value:
+        sz = CGSize()
+        if ax.AXValueGetValue(sv, 2, ctypes.byref(sz)):  # kAXValueCGSizeType
+            w, h = sz.width, sz.height
+    tk = cfstr("AXTitle")
+    tv = ctypes.c_void_p()
+    ax.AXUIElementCopyAttributeValue(v, tk, ctypes.byref(tv))
+    cf.CFRelease(tk)
+    title = cf2str(tv.value) if tv.value else ""
+    print(f"焦点窗口: {title or '(无标题)'} | {x:.0f},{y:.0f} {w:.0f}x{h:.0f} | PID={pid}")
+
+
+def cmd_scale():
+    """主显示器的 backing scale factor（Retina 是 2.0）。
+
+    screencapture -R 用的是**像素**，而我们的坐标系用的是**点**，
+    Retina 上差一倍，区域截图必须乘这个系数。
+    """
+    did = cg.CGMainDisplayID()
+    px = cg.CGDisplayPixelsWide(did)
+    bounds = cg.CGDisplayBounds(did)
+    pts = bounds.size.width
+    if not pts:
+        print("取显示器尺寸失败")
+        return
+    print(f"{px / pts:.4f}")
+
+
 # ---------------- CLI ----------------
 def main(argv):
     if len(argv) < 2:
@@ -449,8 +569,12 @@ def main(argv):
     a = argv[2:]
     if cmd == "windows":
         cmd_windows()
+    elif cmd == "windowsall":
+        cmd_windows_all()
     elif cmd == "front":
         cmd_front()
+    elif cmd == "active":
+        cmd_active()
     elif cmd == "pos":
         x, y = mouse_pos()
         print(f"{x:.0f} {y:.0f}")
@@ -486,6 +610,10 @@ def main(argv):
         cmd_axfind(a[0], a[1])
     elif cmd == "activate":
         cmd_activate(a[0])
+    elif cmd == "focusedwin":
+        cmd_focused_window(a[0])
+    elif cmd == "scale":
+        cmd_scale()
     elif cmd == "check":
         print("辅助功能:", "已授权" if ax.AXIsProcessTrusted() else "未授权")
     else:

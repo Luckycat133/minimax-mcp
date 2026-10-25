@@ -41,6 +41,16 @@ minimax_send_message {message: "…", send: false}   # 只粘贴，不发送
 minimax_send_message {message: "…", send: true}    # 粘贴并回车
 ```
 
+**默认带活跃守卫**：如果最近活跃的会话不久前还有活动（默认 300 秒内），直接拒绝发送，
+返回里会告诉你那个会话多久前还在动。这是为了防止把自动化消息插进你正在进行的工作。
+确认要发就加 `force: true`，或者用 `quietSeconds` 改阈值（`0` 表示不检查）。
+
+动手前先预览——只读，不点不粘不发，会告诉你坐标、遮挡情况、守卫状态：
+
+```
+minimax_send_message {message: "…", send: true, preview: true}
+```
+
 三条硬规则：
 
 1. **默认 `send: false`**。要真发必须显式 `send: true`，避免误发。
@@ -49,7 +59,7 @@ minimax_send_message {message: "…", send: true}    # 粘贴并回车
 3. **以返回值为准，不要以"我回车了"为准**。`verified: true` 表示数据库里真的出现了这条消息；
    `verified: false` 表示大概率没发出去，这时截图看输入框是不是还留着文字，换 `at` 坐标重试。
 
-输入框坐标：`at` 不传时按窗口自动推算——`layout: "chat"` 是会话页底部输入框，
+输入框坐标：`at` 不传时按**焦点窗口**自动推算——`layout: "chat"` 是会话页底部输入框，
 `layout: "newtask"` 是新建任务页中部那个大输入框。窗口位置每次都可能变，
 推算不准就 `minimax_windows` 看几何，再显式给 `at`。
 

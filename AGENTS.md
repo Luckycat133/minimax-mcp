@@ -40,3 +40,19 @@ npm test         # 真实 stdio 会话冒烟：initialize → tools/list → 只
 - 切会话要点左侧列表，坐标随布局变。
 - 窗口被完全遮挡时后台截到旧帧。
 - MCP 工具面版本（CONTRACT_VERSION）与 MCP 协议修订号是两件事，别混。
+
+## 实测踩过的坑（都已修，别改回去）
+
+1. **判断"App 是否在前台"不能看最上层窗口**。浮动面板（NSPanel）会一直躺在最上层，
+   但它不是活跃应用。必须用 `lsappinfo front` → `lsappinfo info <ASN>` 拿活跃应用。
+2. **`CGWindowListCopyWindowInfo(OnScreenOnly)` 会漏掉隐藏/最小化/在别的 Space 的窗口**，
+   那种情况会误判成"App 没有窗口"。用 `kCGWindowListOptionAll` 兜底，并配 `open -a` 拉回来。
+3. **取焦点窗口必须按目标 App 自己的 PID 查**，不能按"当前活跃应用"查——
+   否则 MCP 宿主自己在前台时就会拿到宿主的窗口，点击直接打到宿主上去。
+4. **一个 App 可能同时开多个窗口**（主窗口 + 新建任务页）。按键和输入去的是焦点窗口
+   （AXFocusedWindow），不是面积最大的那个。算坐标前先用焦点窗口。
+5. **`sqlite3` CLI 不接受绑定参数**：SQL 后面多出来的 argv 会被当成下一条 SQL 执行。
+   必须转义后内联。
+6. **区域截图的坐标**：`screencapture -R` 用像素，我们的坐标系用点，Retina 上要乘
+   backing scale（`CGDisplayPixelsWide / CGDisplayBounds.width`）。本机实测是 1.0，
+   但换了分辨率设置就会变，代码里必须留换算。
