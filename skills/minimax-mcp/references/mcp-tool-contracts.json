@@ -110,7 +110,7 @@
         "force": "boolean, 默认 false；跳过活跃守卫",
         "preview": "boolean, 默认 false；只预览不动作"
       },
-      "output": "sent, verified, sessionId, messageId | warning | preview{...}",
+      "output": "sent, verified, sessionId, messageId | warning | preview{inputAt,overlay,busySessions,guard}",
       "sideEffects": "剪贴板、键鼠；send=true 时真的发送。preview=true 时无副作用"
     },
     {
@@ -128,7 +128,8 @@
       "name": "minimax_type",
       "intent": "在焦点处输入文本",
       "input": {
-        "text": "string（必填）"
+        "text": "string（必填）",
+        "force": "boolean, 默认 false；跳过活跃守卫"
       },
       "output": "typed",
       "sideEffects": "键盘输入"

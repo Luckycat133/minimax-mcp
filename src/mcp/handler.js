@@ -23,14 +23,23 @@ function fail(message) {
 }
 
 /**
- * 目标会话最近是否还在活动。
- * 「最近活跃的会话」基本就是当前打开的那个——用它判断用户是否正在对话中，
- * 避免把测试/自动化消息插进人家正在进行的工作。
+ * 守卫用的候选会话：合并两个信号——
+ *  1. local_runtime_sessions.updated_at_ms 最新的几个（打开/切会话会刷新，最接近"正在看"）
+ *  2. 消息活跃度最高的几个（正在跑的会话）
+ * 两个信号的并集里，只要有会话在 quietSeconds 内动过就认为"用户正在对话中"。
+ * 宁可拦错，不可误发。
  */
-function mostRecentSessionActivity() {
-  const list = db.listSessions(1);
-  if (!list.length) return null;
-  return list[0];
+function guardCandidates() {
+  const seen = new Map();
+  for (const s of db.recentlyTouchedSessions(3)) {
+    seen.set(s.sessionId, { ...s, source: 'touched' });
+  }
+  for (const s of db.listSessions(3)) {
+    if (!seen.has(s.sessionId)) {
+      seen.set(s.sessionId, { sessionId: s.sessionId, title: s.firstUserMessage || '', status: null, lastActivityMs: s.lastActivityMs, source: 'messages' });
+    }
+  }
+  return [...seen.values()];
 }
 
 /** 点击前的命中测试：那个点上盖着别的 App 就不能点。 */
@@ -128,30 +137,30 @@ function callTool(name, args = {}) {
         // 预览模式：只报告会发生什么，不点、不粘、不发。只读，所以不受守卫限制。
         if (args.preview === true) {
           const overlay = blockedByOverlay(coords.x, coords.y);
-          const recent = mostRecentSessionActivity();
-          const idleMs = recent?.lastActivityMs ? Date.now() - recent.lastActivityMs : Infinity;
+          const busy = guardCandidates()
+            .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
+            .filter((s) => s.idleSeconds < quietSeconds);
           return ok({
             preview: true,
             wouldSend: args.send === true,
             inputAt: coords,
             overlay: overlay ? { app: overlay.app, title: overlay.title } : null,
             activeApp: gui.activeApp(),
-            mostRecentSession: recent
-              ? { sessionId: recent.sessionId, idleSeconds: Math.round(idleMs / 1000) }
-              : null,
-            guard: { busy: idleMs < quietSeconds * 1000, quietSeconds },
+            busySessions: busy.map((s) => ({ sessionId: s.sessionId, title: s.title, idleSeconds: s.idleSeconds, source: s.source })),
+            guard: { busy: busy.length > 0, quietSeconds },
           });
         }
 
-        // 守卫：当前会话还在活跃就不发，除非显式 force。
+        // 守卫：候选会话里有刚动过的就不发，除非显式 force。
         // 防止把自动化/测试消息插进用户正在进行的工作。
-        const recent = mostRecentSessionActivity();
-        const idleMs = recent?.lastActivityMs ? Date.now() - recent.lastActivityMs : Infinity;
-        if (idleMs < quietSeconds * 1000 && !force) {
+        const busy = guardCandidates()
+          .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
+          .filter((s) => s.idleSeconds < quietSeconds);
+        if (busy.length > 0 && !force) {
+          const list = busy.map((s) => `${s.sessionId}${s.title ? `（${s.title}）` : ''} ${s.idleSeconds}s 前`).join('；');
           return fail(
-            `当前会话 ${recent.sessionId} ${Math.round(idleMs / 1000)} 秒前还在活动，` +
-            `看起来你正在对话中。已拒绝发送以免打扰。` +
-            `确认要发就加 force: true；或者调整 quietSeconds（当前 ${quietSeconds}）。`
+            `有会话刚还在活动，看起来你正在对话中，已拒绝发送以免打扰：${list}。` +
+            `确认要发就加 force: true；或者调大 quietSeconds（当前 ${quietSeconds}）。`
           );
         }
 
@@ -195,6 +204,13 @@ function callTool(name, args = {}) {
 
       case 'minimax_type': {
         if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+        // 打字会往用户正在编辑的输入框里塞东西，同样过活跃守卫。
+        const busy = guardCandidates()
+          .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
+          .filter((s) => s.idleSeconds < 300);
+        if (busy.length > 0 && args.force !== true) {
+          return fail(`有会话刚还在活动（${busy.map((s) => `${s.idleSeconds}s 前`).join('；')}），已拒绝输入以免打扰。确认要输就加 force: true`);
+        }
         return ok(gui.typeText(args.text));
       }
 

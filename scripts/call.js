@@ -6,6 +6,9 @@
  *   node scripts/call.js minimax_status
  *   node scripts/call.js minimax_read_session '{"session":"1","limit":5}'
  *   node scripts/call.js minimax_send_message '{"message":"继续","send":true}'
+ *
+ *   --dry-run  把 send 强制改成 false、并打开 preview，绝不真的发送。
+ *              例：node scripts/call.js minimax_send_message '{"message":"..."}' --dry-run
  */
 
 const path = require('node:path');
@@ -13,10 +16,13 @@ const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 
 const SERVER = path.join(__dirname, '..', 'mcp-server.js');
-const [tool, rawArgs] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const dryRun = argv.includes('--dry-run');
+const positional = argv.filter((a) => a !== '--dry-run');
+const [tool, rawArgs] = positional;
 
 if (!tool) {
-  console.error('用法: node scripts/call.js <工具名> [JSON参数]');
+  console.error('用法: node scripts/call.js <工具名> [JSON参数] [--dry-run]');
   process.exit(2);
 }
 
@@ -26,6 +32,16 @@ if (rawArgs) {
     console.error(`参数不是合法 JSON: ${err.message}`);
     process.exit(2);
   }
+}
+
+if (dryRun) {
+  if (tool === 'minimax_send_message') {
+    args = { ...args, send: false, preview: true };
+  } else {
+    console.error(`--dry-run 只对 minimax_send_message 有意义（当前: ${tool}）`);
+    process.exit(2);
+  }
+  console.error('[dry-run] 已强制 send=false + preview=true，不会发送任何东西');
 }
 
 const child = spawn(process.execPath, [SERVER], { stdio: ['pipe', 'pipe', 'pipe'] });

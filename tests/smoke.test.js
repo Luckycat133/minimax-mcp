@@ -100,12 +100,24 @@ function main() {
     let pvDetail = '';
     if (pvOk) {
       const parsed = JSON.parse(pv.result.content[0].text);
-      pvOk = parsed.preview === true && typeof parsed.guard === 'object' && typeof parsed.inputAt === 'object';
-      pvDetail = `guard.busy=${parsed.guard?.busy}`;
+      pvOk = parsed.preview === true
+        && typeof parsed.guard === 'object'
+        && typeof parsed.inputAt === 'object'
+        && Array.isArray(parsed.busySessions);
+      pvDetail = `guard.busy=${parsed.guard?.busy}, busySessions=${parsed.busySessions?.length}`;
     } else {
       pvDetail = pv.result?.content?.[0]?.text?.slice(0, 100) || 'error';
     }
     record('preview 只读且放行', pvOk, pvDetail);
+
+    // 回归：有会话在活跃时，发送必须被守卫拒绝，且错误里要点名是哪些会话。
+    const guarded = await send('tools/call', {
+      name: 'minimax_send_message',
+      arguments: { message: '联调守卫测试', send: true },
+    });
+    const gErr = guarded.result?.isError === true;
+    const gText = guarded.result?.content?.[0]?.text || '';
+    record('活跃守卫拦住发送', gErr && /已拒绝发送/.test(gText), gErr ? gText.slice(0, 110) : '竟然放行了');
 
     const failed = results.filter((r) => !r.pass).length;
     console.log(`\n${results.length - failed}/${results.length} 通过`);

@@ -45,11 +45,19 @@ minimax_send_message {message: "…", send: true}    # 粘贴并回车
 返回里会告诉你那个会话多久前还在动。这是为了防止把自动化消息插进你正在进行的工作。
 确认要发就加 `force: true`，或者用 `quietSeconds` 改阈值（`0` 表示不检查）。
 
-动手前先预览——只读，不点不粘不发，会告诉你坐标、遮挡情况、守卫状态：
+动手前先预览——只读，不点不粘不发，会告诉你坐标、遮挡情况、以及**哪些会话正在忙**：
 
 ```
 minimax_send_message {message: "…", send: true, preview: true}
 ```
+
+CLI 有等价的 `--dry-run`，会强制 `send=false` + `preview=true`：
+
+```bash
+node scripts/call.js minimax_send_message '{"message":"…","send":true}' --dry-run
+```
+
+`minimax_type` 同样受守卫保护——它会往你正在编辑的输入框里塞字，确认要输得加 `force: true`。
 
 三条硬规则：
 

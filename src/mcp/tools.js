@@ -138,10 +138,13 @@ const TOOLS = [
   },
   {
     name: 'minimax_type',
-    description: '在当前焦点处输入文本（支持中文）。仅用于已确认焦点的场景。',
+    description: '在当前焦点处输入文本（支持中文）。仅用于已确认焦点的场景。同样受活跃守卫保护——有会话刚还在活动就拒绝输入，确认要输加 force:true。',
     inputSchema: {
       type: 'object',
-      properties: { text: { type: 'string' } },
+      properties: {
+        text: { type: 'string' },
+        force: { type: 'boolean', default: false, description: '跳过活跃守卫' },
+      },
       required: ['text'],
       additionalProperties: false,
     },

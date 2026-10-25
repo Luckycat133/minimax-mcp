@@ -243,6 +243,25 @@ function tasks(limit = 20, statusFilter = null) {
   }));
 }
 
+/**
+ * 最近被"碰到"的会话：取 local_runtime_sessions.updated_at_ms 最新的几个。
+ * 打开/切换会话会刷新这个时间戳，比消息活跃度更接近"用户正在看哪个"。
+ */
+function recentlyTouchedSessions(limit = 3) {
+  const rows = query(
+    'select session_id, title, status, updated_at_ms ' +
+    'from local_runtime_sessions where archived = 0 ' +
+    'order by updated_at_ms desc limit ?',
+    [limit]
+  );
+  return rows.map((r) => ({
+    sessionId: r.session_id,
+    title: r.title || '',
+    status: r.status,
+    lastActivityMs: Number(r.updated_at_ms),
+  }));
+}
+
 /** 取当前最大消息 id，用于发送后判断有没有真的入库。 */
 function maxMessageId() {
   const row = one('select coalesce(max(id),0) as m from local_runtime_message_rows');
@@ -275,6 +294,7 @@ module.exports = {
   query,
   status,
   listSessions,
+  recentlyTouchedSessions,
   resolveSession,
   readSession,
   tailSessions,
