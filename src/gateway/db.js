@@ -319,6 +319,71 @@ function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, interval
   };
 }
 
+/** 取一条问卷/提问的完整结构（问题、选项、recommended 标记）。 */
+function questionnaireDetail(requestId) {
+  const row = one(
+    'select request_id, session_id, agent_name, status, request_json, ' +
+    "datetime(created_at/1000,'unixepoch','localtime') as createdAt, reply_payload " +
+    'from questionnaire_requests where request_id = ?',
+    [requestId]
+  );
+  if (!row) return null;
+  let parsed = {};
+  try {
+    parsed = JSON.parse(row.request_json || '{}');
+  } catch { /* 保持空 */ }
+  const steps = (parsed.steps || []).map((s) => ({
+    stepId: s.id,
+    question: s.question || '',
+    selectionMode: s.selectionMode || 'single',
+    required: s.required !== false,
+    allowOther: s.allowOther === true,
+    options: (s.options || []).map((o) => ({
+      optionId: o.id,
+      label: o.label || '',
+      description: o.description || '',
+      recommended: o.recommended === true,
+    })),
+  }));
+  return {
+    requestId: row.request_id,
+    sessionId: row.session_id,
+    agent: row.agent_name,
+    status: row.status,
+    createdAt: row.createdAt,
+    title: parsed.title || '',
+    replaceComposer: parsed.presentation?.replaceComposer === true,
+    steps,
+    answered: row.reply_payload ? safeParse(row.reply_payload) : null,
+  };
+}
+
+function safeParse(text) {
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+/**
+ * 按 recommended 标记生成一份建议答案，并给出对应的 reply_payload。
+ * 只读、无副作用——答了等于替用户做决定，所以这里只出草稿，不提交。
+ */
+function suggestAnswer(detail) {
+  if (!detail) return null;
+  const answers = detail.steps.map((s) => {
+    const picked = s.options.filter((o) => o.recommended).map((o) => o.optionId);
+    const fallback = picked.length ? picked : (s.options[0] ? [s.options[0].optionId] : []);
+    return { stepId: s.stepId, selectedOptionIds: fallback, selectedOther: false };
+  });
+  return {
+    basis: '取每步 recommended 标记的选项；没有标记就取第一个',
+    answers,
+    replyPayload: {
+      schemaVersion: 2,
+      requestId: detail.requestId,
+      answers,
+    },
+  };
+}
+
 /** 取当前最大消息 id，用于发送后判断有没有真的入库。 */
 function maxMessageId() {
   const row = one('select coalesce(max(id),0) as m from local_runtime_message_rows');
@@ -357,6 +422,8 @@ module.exports = {
   tailSessions,
   search,
   pending,
+  questionnaireDetail,
+  suggestAnswer,
   tasks,
   maxMessageId,
   waitForUserMessage,

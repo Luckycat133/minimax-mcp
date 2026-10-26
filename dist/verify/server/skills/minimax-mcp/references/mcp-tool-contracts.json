@@ -1,0 +1,205 @@
+{
+  "contractVersion": 1,
+  "server": {
+    "name": "minimax-mcp",
+    "version": "0.1.0",
+    "transport": "stdio"
+  },
+  "tools": [
+    {
+      "name": "minimax_status",
+      "intent": "本地状态总览",
+      "input": {},
+      "output": "dbPath, dbFound, sessions, messages, lastActivity, runningTasks",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_list_sessions",
+      "intent": "按最近活动列出会话",
+      "input": {
+        "limit": "integer 1-100, 默认 20"
+      },
+      "output": "sessions[{index, sessionId, messages, lastActivity, firstUserMessage}]",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_read_session",
+      "intent": "读某个会话的消息",
+      "input": {
+        "session": "会话 ID 或 list_sessions 返回的序号（必填）",
+        "limit": "integer 1-200, 默认 30",
+        "includeThinking": "boolean, 默认 false"
+      },
+      "output": "sessionId, returned, messages[{role,time,content,tools,thinking}]",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_tail_sessions",
+      "intent": "最近 N 个会话各自最新的几条",
+      "input": {
+        "count": "默认 3",
+        "perSession": "默认 2"
+      },
+      "output": "sessions[...{latest}]",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_search",
+      "intent": "跨会话全文搜索",
+      "input": {
+        "query": "string（必填）",
+        "limit": "默认 20"
+      },
+      "output": "hits[{sessionId, role, time, snippet}]",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_pending",
+      "intent": "等你回答的提问/确认",
+      "input": {},
+      "output": "pending[{requestId, sessionId, agent, createdAt, question}]",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_tasks",
+      "intent": "后台任务状态",
+      "input": {
+        "limit": "默认 20",
+        "status": "可选过滤"
+      },
+      "output": "tasks[{taskId, sessionId, kind, status, createdAt, updatedAt}]",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_windows",
+      "intent": "MiniMax 窗口几何",
+      "input": {},
+      "output": "count, windows[{pid,x,y,width,height,title,app}]",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_activate",
+      "intent": "切到前台",
+      "input": {},
+      "output": "activated, front{app,title,pid,x,y,width,height}",
+      "sideEffects": "窗口切换"
+    },
+    {
+      "name": "minimax_screenshot",
+      "intent": "截图",
+      "input": {
+        "name": "string, 默认 minimax",
+        "mode": "screen | region, 默认 screen",
+        "x": "number（region 必填）",
+        "y": "number（region 必填）",
+        "width": "number（region 必填）",
+        "height": "number（region 必填）"
+      },
+      "output": "path, thumbnail",
+      "sideEffects": "写截图文件"
+    },
+    {
+      "name": "minimax_send_message",
+      "intent": "往当前会话输入指令",
+      "input": {
+        "message": "string（必填）",
+        "send": "boolean, 默认 false",
+        "at": "\"x,y\"，可选",
+        "layout": "chat | newtask, 默认 chat",
+        "quietSeconds": "integer, 默认 300；当前会话多久没活动才允许发送，0=不检查",
+        "force": "boolean, 默认 false；跳过活跃守卫",
+        "preview": "boolean, 默认 false；只预览不动作"
+      },
+      "output": "sent, verified, sessionId, messageId | warning | preview{inputAt,overlay,busySessions,guard}",
+      "sideEffects": "剪贴板、键鼠；send=true 时真的发送。preview=true 时无副作用"
+    },
+    {
+      "name": "minimax_click",
+      "intent": "点击坐标",
+      "input": {
+        "x": "number（必填）",
+        "y": "number（必填）",
+        "button": "left | right"
+      },
+      "output": "clicked, button",
+      "sideEffects": "鼠标点击"
+    },
+    {
+      "name": "minimax_type",
+      "intent": "在焦点处输入文本",
+      "input": {
+        "text": "string（必填）",
+        "force": "boolean, 默认 false；跳过活跃守卫"
+      },
+      "output": "typed",
+      "sideEffects": "键盘输入"
+    },
+    {
+      "name": "minimax_key",
+      "intent": "按键",
+      "input": {
+        "key": "string（必填）",
+        "modifiers": "string[]"
+      },
+      "output": "key, modifiers",
+      "sideEffects": "键盘"
+    },
+    {
+      "name": "minimax_get_result",
+      "intent": "等某会话跑完并收回最终回复",
+      "input": {
+        "sessionId": "可选，默认最近活跃",
+        "afterMessageId": "默认 0",
+        "timeoutSeconds": "默认 300"
+      },
+      "output": "done, sessionId, waitedSeconds, lastAssistantMessageId, result",
+      "sideEffects": "none（只读轮询）"
+    },
+    {
+      "name": "minimax_stop_generation",
+      "intent": "停止当前这轮生成",
+      "input": {},
+      "output": "stopped, via",
+      "sideEffects": "按 Esc 键"
+    },
+    {
+      "name": "minimax_draft_answer",
+      "intent": "读一条提问并生成建议答案（只读）",
+      "input": {
+        "requestId": "string（必填）"
+      },
+      "output": "requestId, status, title, steps[{stepId,question,options[{optionId,label,recommended}]}], suggestion{answers, replyPayload}",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_answer_question",
+      "intent": "提交一条提问的回答",
+      "input": {
+        "requestId": "string（必填）",
+        "selections": "[{stepId, optionIds}]，省略用 recommended 那份",
+        "preview": "boolean, 默认 true",
+        "force": "boolean, 默认 false",
+        "at": "\"x,y\" 第一个选项坐标"
+      },
+      "output": "preview{wouldSubmit} | submitted + pendingSelections + warning",
+      "sideEffects": "preview=true 无副作用；否则点 GUI。GUI 路径未用真实问卷验证"
+    },
+    {
+      "name": "minimax_new_task",
+      "intent": "新建任务页（⌘N）",
+      "input": {},
+      "output": "opened, newWindow, window{x,y,width,height}, hint",
+      "sideEffects": "按键；可能开出新窗口"
+    },
+    {
+      "name": "minimax_open_session",
+      "intent": "切换到某个会话",
+      "input": {
+        "session": "string（必填）",
+        "at": "\"x,y\"，不给则只返回状态不乱点"
+      },
+      "output": "opened, sessionId, clicked | hint",
+      "sideEffects": "给了 at 才点击"
+    }
+  ]
+}

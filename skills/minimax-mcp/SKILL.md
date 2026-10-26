@@ -24,12 +24,17 @@ MiniMax Code 是 Electron 应用，没有本地 HTTP API，跨进程 AX 树也�
 巡检类诉求（谁在等回答、谁有结果、谁卡住）全程只读，随便用：
 
 ```
+minimax_status                                     # 总量：会话数/消息数/最后活动/运行中任务
 minimax_tail_sessions {count: 6, perSession: 2}   # 一眼看完全部会话最新进展
 minimax_pending                                    # 谁在等你回答
 minimax_tasks {status: "running"}                  # 还有什么在跑
 minimax_list_sessions                              # 需要精确定位时再列全部
 minimax_read_session {session: "3", limit: 20}     # 读某个会话（可传序号或 mvs_ ID）
+minimax_search {query: "关键词"}                    # 跨会话全文搜索
 ```
+
+判断"卡住"的可靠标准：末条消息 role 是 `user` 且时间早已过去 → 那条指令没被处理。
+`minimax_pending` 有内容 → 有问卷在等回答。
 
 判断"卡住"的可靠标准：末条消息 role 是 `user` 且时间早已过去 → 那条指令没被处理。
 `minimax_pending` 有内容 → 有问卷在等回答。
@@ -71,6 +76,32 @@ node scripts/call.js minimax_send_message '{"message":"…","send":true}' --dry-
 `layout: "newtask"` 是新建任务页中部那个大输入框。窗口位置每次都可能变，
 推算不准就 `minimax_windows` 看几何，再显式给 `at`。
 
+## 新建 / 切换会话
+
+```
+minimax_new_task {}                              # 按 ⌘N 新建任务页，并对比前后窗口确认开出来了
+minimax_open_session {session: "3", at: "1250,700"}   # 点左侧列表切换会话
+```
+
+`minimax_open_session` **不给 at 就只返回当前状态，不乱点**——MiniMax 是 Electron，
+左侧列表读不到控件树，中文 OCR 也不可靠，所以必须由你先截图确定条目坐标。
+`minimax_new_task` 开出来的可能是独立窗口，之后发消息要用 `layout:"newtask"` 或显式 `at`。
+
+## 回答提问
+
+```
+minimax_draft_answer {requestId: "ask_xxx"}      # 只读：问题全文 + 全部选项 + 一份建议答案
+minimax_answer_question {requestId: "ask_xxx"}   # 默认只 preview，不提交
+```
+
+`minimax_draft_answer` 会按每步的 `recommended` 标记给一份建议答案和对应的 reply payload，
+同时把问题和选项原文都给你——**最终判断是你的**。建议答案只是起点，实际答案经常和
+recommended 不一样（我拿历史问卷验过，有一步用户选的就不是 recommended 那个）。
+
+`minimax_answer_question` 默认 `preview:true`，只报告会提交什么、会点什么，不动手。
+要真提交必须 `preview:false` + `force:true` + `at` 坐标，而且**这条 GUI 路径没有用真实
+问卷验证过**（没有可测的 pending 提问）——每一步之后都截图核对。
+
 ## 收结果
 
 发出去之后用它收，不用自己轮询：
@@ -97,6 +128,9 @@ minimax_click {x: 678, y: 597}
 ```
 
 一次只点一下，点完截图核对。不要连发一串点击。
+
+`minimax_key` 是通用按键（`{"key":"n","modifiers":["cmd"]}` = ⌘N），
+`minimax_stop_generation` 是按 Esc 停当前这轮生成。
 
 ## 硬规则
 

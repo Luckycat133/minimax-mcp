@@ -1,0 +1,29 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": [
+    "Luckycat133"
+  ],
+  "name": "MiniMax Code MCP",
+  "description": "Local-first stdio MCP server and Agent Skill that lets AI agents read every MiniMax Code conversation and drive its UI on the user's Mac.",
+  "repository": "https://github.com/Luckycat133/minimax-mcp",
+  "homepage": "https://github.com/Luckycat133/minimax-mcp",
+  "license": "MIT",
+  "type": "mcp_server",
+  "status": "development",
+  "transport": [
+    "stdio"
+  ],
+  "tools": 20,
+  "keywords": [
+    "minimax",
+    "minimax-code",
+    "mcp",
+    "agent-skill",
+    "desktop-automation",
+    "macos",
+    "local-first",
+    "sqlite",
+    "coregraphics",
+    "developer-tools"
+  ]
+}

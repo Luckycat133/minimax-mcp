@@ -56,3 +56,20 @@ npm test         # 真实 stdio 会话冒烟：initialize → tools/list → 只
 6. **区域截图的坐标**：`screencapture -R` 用像素，我们的坐标系用点，Retina 上要乘
    backing scale（`CGDisplayPixelsWide / CGDisplayBounds.width`）。本机实测是 1.0，
    但换了分辨率设置就会变，代码里必须留换算。
+
+## 分发
+
+```sh
+npm run pack:npm     # 打 tarball 并校验内容（不发布）
+npm run pack:mcpb    # 打 .mcpb bundle 并解包验证能 require
+```
+
+产物在 `dist/`。两个脚本互不删除对方产物。
+
+## 踩过的坑（打包相关）
+
+- 宿主对 Node 的 `fs.copyFileSync` 有文件类型白名单，`.py` 会被拒
+  （`CODEBUDDY_BROKER_DENY`）。构建脚本里拷 `.py` 必须走 shell 的 `cp`。
+- `cp -R` 不建父目录，目标父目录不存在会 ENOENT，先 `mkdir -p`。
+- `npm pack` 会把 `dist/` 一起塞进去，所以 `dist/` 必须留在 `.gitignore` 里，
+  且构建脚本要显式排除。

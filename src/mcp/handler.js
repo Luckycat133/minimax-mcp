@@ -7,6 +7,11 @@
 
 const db = require('../gateway/db');
 const gui = require('../gateway/gui');
+const tasks = require('./tasks');
+
+/** 客户端是否协商了 Tasks 扩展。由 stdio-server 在 initialize 时设置。 */
+let tasksEnabled = false;
+function setTasksEnabled(v) { tasksEnabled = v === true; }
 
 const READONLY = new Set([
   'minimax_status', 'minimax_list_sessions', 'minimax_read_session',
@@ -184,7 +189,18 @@ function callTool(name, args = {}) {
         gui.pressKey('return');
         const hit = db.waitForUserMessage(before, args.message);
         if (hit.ok) {
-          return ok({ sent: true, verified: true, sessionId: hit.sessionId, messageId: hit.messageId });
+          const payload = { sent: true, verified: true, sessionId: hit.sessionId, messageId: hit.messageId };
+          // 客户端支持 Tasks 扩展时，顺手建一条持久任务，host 可以订阅而不必轮询
+          if (tasksEnabled) {
+            const t = tasks.create({
+              sessionId: hit.sessionId,
+              afterMessageId: hit.messageId,
+              messagePreview: String(args.message).slice(0, 80),
+            });
+            payload.taskId = t.taskId;
+            payload.note = '已创建任务；用 tasks/get 看状态、tasks/result 取结果，完成时会收到 notifications/tasks/status';
+          }
+          return ok(payload);
         }
         return ok({
           sent: true,
@@ -226,6 +242,125 @@ function callTool(name, args = {}) {
         return ok(db.waitForResult(sid, after, timeout));
       }
 
+      case 'minimax_draft_answer': {
+        const detail = db.questionnaireDetail(args.requestId);
+        if (!detail) return fail(`找不到提问: ${args.requestId}`);
+        if (detail.status !== 'pending') {
+          return ok({
+            requestId: detail.requestId,
+            status: detail.status,
+            note: `这条提问已经是 ${detail.status}，不用再答`,
+            answered: detail.answered,
+          });
+        }
+        const suggestion = db.suggestAnswer(detail);
+        return ok({
+          requestId: detail.requestId,
+          sessionId: detail.sessionId,
+          title: detail.title,
+          steps: detail.steps,
+          suggestion,
+          note: '以上是草稿。要提交用 minimax_answer_question，默认也只 preview。',
+        });
+      }
+
+      case 'minimax_answer_question': {
+        const detail = db.questionnaireDetail(args.requestId);
+        if (!detail) return fail(`找不到提问: ${args.requestId}`);
+        if (detail.status !== 'pending') {
+          return fail(`这条提问已经是 ${detail.status}，不能再答`);
+        }
+        const suggestion = db.suggestAnswer(detail);
+        const selections = Array.isArray(args.selections) && args.selections.length
+          ? args.selections
+          : suggestion.answers;
+
+        // 默认只预览：答了等于替用户做决定，不当默认行为。
+        if (args.preview !== false) {
+          return ok({
+            preview: true,
+            requestId: detail.requestId,
+            sessionId: detail.sessionId,
+            title: detail.title,
+            wouldSubmit: {
+              schemaVersion: 2,
+              requestId: detail.requestId,
+              answers: selections.map((s) => ({ stepId: s.stepId, selectedOptionIds: s.optionIds, selectedOther: false })),
+            },
+            steps: detail.steps,
+            note: 'preview 模式没有做任何操作。要真提交：preview:false + force:true，并先用截图确认问卷 UI 的选项位置。',
+          });
+        }
+
+        if (args.force !== true) {
+          return fail('这是在替用户做决定。确认要提交就显式加 force:true');
+        }
+        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+        if (!args.at) {
+          return fail('需要 at 坐标（问卷第一个选项的位置）。先截图确定，再传 "x,y"');
+        }
+        // GUI 提交路径：尚未用真实问卷验证过（没有可测的 pending 提问）。
+        // 这里只实现第一步——点到第一个选项，剩下的交给调用方按截图继续。
+        const [ax, ay] = String(args.at).split(',').map(Number);
+        const overlay = blockedByOverlay(ax, ay);
+        if (overlay) {
+          return fail(`坐标 (${ax},${ay}) 被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}`);
+        }
+        gui.click(ax, ay);
+        return ok({
+          submitted: false,
+          clickedFirstOption: [ax, ay],
+          pendingSelections: selections,
+          warning: '只点了第一个选项。问卷多为多步，后续步骤需要按截图继续点，最后点提交。这条 GUI 路径没有用真实问卷验证过——每步之后都截图核对。',
+        });
+      }
+
+      case 'minimax_new_task': {
+        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+        const before = gui.appWindows().map((w) => `${w.pid}:${w.x},${w.y},${w.width}x${w.height}`).sort();
+        gui.pressKey('n', ['cmd']);
+        gui.sleep(2500);
+        const after = gui.appWindows().map((w) => `${w.pid}:${w.x},${w.y},${w.width}x${w.height}`).sort();
+        const opened = after.filter((w) => !before.includes(w));
+        if (opened.length) {
+          const m = opened[0].match(/^(\d+):(-?[\d.]+),(-?[\d.]+),(\d+)x(\d+)$/);
+          const geo = m ? { x: Number(m[2]), y: Number(m[3]), width: Number(m[4]), height: Number(m[5]) } : null;
+          return ok({
+            opened: true,
+            newWindow: opened,
+            window: geo,
+            hint: geo ? `新任务页输入框大约在 (${Math.round(geo.x + geo.width * 0.416)}, ${Math.round(geo.y + geo.height * 0.418)})，或直接用 layout:"newtask"` : null,
+          });
+        }
+        return ok({
+          opened: false,
+          note: '按了 ⌘N 但没检测到新窗口。可能快捷键没注册、或新任务页是在当前窗口内切换的视图——截图确认一下。',
+          windows: after,
+        });
+      }
+
+      case 'minimax_open_session': {
+        const sid = db.resolveSession(args.session);
+        if (!sid) return fail(`找不到会话: ${args.session}`);
+        if (!args.at) {
+          return ok({
+            opened: false,
+            sessionId: sid,
+            hint: '没给 at 坐标，没有乱点。先 minimax_screenshot 看左侧列表，确定该条目的坐标后用 at:"x,y" 重试。',
+            currentWindow: gui.mainWindow(),
+          });
+        }
+        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+        const [x, y] = String(args.at).split(',').map(Number);
+        const overlay = blockedByOverlay(x, y);
+        if (overlay) {
+          return fail(`坐标 (${x},${y}) 被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}`);
+        }
+        gui.click(x, y);
+        gui.sleep(1200);
+        return ok({ opened: true, sessionId: sid, clicked: [x, y], note: '点完了，截图核对一下是不是这个会话' });
+      }
+
       case 'minimax_stop_generation': {
         if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
         gui.pressKey('escape');
@@ -245,4 +380,4 @@ function callTool(name, args = {}) {
   }
 }
 
-module.exports = { callTool, READONLY };
+module.exports = { callTool, READONLY, setTasksEnabled };

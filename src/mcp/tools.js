@@ -166,7 +166,7 @@ const TOOLS = [
     name: 'minimax_get_result',
     description:
       '等某个会话把当前这轮跑完，返回最终回复。发给 minimax_send_message 之后用它收结果，' +
-      '不用自己轮询。判定"跑完"的依據是会话状态回到 idle 且最后一条助手消息有正文。' +
+      '不用自己轮询。判定"跑完"的依据是会话状态回到 idle 且最后一条助手消息有正文。' +
       '超时也会返回，但 result 可能是半成品（done:false）。',
     inputSchema: {
       type: 'object',
@@ -175,6 +175,70 @@ const TOOLS = [
         afterMessageId: { type: 'integer', minimum: 0, default: 0, description: '从这条消息之后开始找，通常传 minimax_send_message 返回的 messageId' },
         timeoutSeconds: { type: 'integer', minimum: 1, maximum: 3600, default: 300 },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minimax_draft_answer',
+    description:
+      '读一条待回答的提问/问卷，返回问题全文、全部选项（含 recommended 标记），' +
+      '以及一份按 recommended 生成的建议答案和对应的 reply payload。纯只读，不提交任何东西。' +
+      '答了等于替用户做决定，所以默认只出草稿。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        requestId: { type: 'string', description: 'minimax_pending 返回的 requestId' },
+      },
+      required: ['requestId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minimax_answer_question',
+    description:
+      '向 MiniMax 提交一条提问的回答。**默认只 preview**：报告会点什么、提交什么 payload，不做任何动作。' +
+      'preview:false 才真的操作 GUI，且需要 force:true——这是在替用户做决定。' +
+      '注意：GUI 提交路径尚未用真实问卷验证过（没有可测的 pending 提问），用前先 preview 并截图核对。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        requestId: { type: 'string' },
+        selections: {
+          type: 'array',
+          description: '每题选中的 optionId；省略则用 recommended 那份',
+          items: {
+            type: 'object',
+            properties: { stepId: { type: 'string' }, optionIds: { type: 'array', items: { type: 'string' } } },
+            required: ['stepId', 'optionIds'],
+          },
+        },
+        preview: { type: 'boolean', default: true },
+        force: { type: 'boolean', default: false },
+        at: { type: 'string', description: '问卷第一个选项的坐标 "x,y"，不传则需先截图确定' },
+      },
+      required: ['requestId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minimax_new_task',
+    description:
+      '在 MiniMax 里新建一个任务页（按 ⌘N）。会对比按键前后的窗口列表来确认是否真的开出来了。' +
+      '注意新建任务页可能是一个独立窗口，之后发消息要用 layout:"newtask" 或显式 at 坐标。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'minimax_open_session',
+    description:
+      '切换到某个会话。MiniMax 是 Electron，左侧列表读不到控件树也做不了可靠的中文 OCR，' +
+      '所以必须由调用方先截图确定条目位置，再用 at 给出坐标。不给 at 时只返回当前状态和所需信息，不乱点。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: { type: 'string', description: '会话 ID 或 minimax_list_sessions 的序号' },
+        at: { type: 'string', description: '左侧列表里该条目的坐标 "x,y"' },
+      },
+      required: ['session'],
       additionalProperties: false,
     },
   },

@@ -1,0 +1,40 @@
+{
+  "name": "minimax-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first stdio MCP server and Agent Skill that lets AI agents read and operate MiniMax Code on the user's Mac.",
+  "homepage": "https://github.com/Luckycat133/minimax-mcp",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/mcp/index.js",
+  "bin": {
+    "minimax-mcp": "mcp-server.js"
+  },
+  "files": [
+    "mcp-server.js",
+    "src/**/*.js",
+    "scripts/mac_gui.py",
+    "skills/**/*",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node mcp-server.js",
+    "doctor": "node scripts/doctor.js",
+    "test": "node tests/smoke.test.js",
+    "pack:npm": "node scripts/build-npm-package.js",
+    "pack:mcpb": "node scripts/build-mcpb.js",
+    "test:contract": "node tests/contract.test.js"
+  },
+  "keywords": [
+    "minimax",
+    "minimax-code",
+    "mcp",
+    "agent-skill",
+    "desktop-automation",
+    "macos",
+    "local-first",
+    "developer-tools"
+  ]
+}

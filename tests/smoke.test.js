@@ -61,17 +61,46 @@ function main() {
     const tools = list.result?.tools || [];
     record('tools/list', tools.length >= 14, `${tools.length} 个工具`);
 
-    for (const name of ['minimax_status', 'minimax_list_sessions', 'minimax_pending']) {
-      const r = await send('tools/call', { name, arguments: {} });
+    // 逐个调所有只读工具。用真实参数，确保不只是"能返回错误"。
+    const readOnlyCalls = [
+      ['minimax_status', {}],
+      ['minimax_list_sessions', { limit: 3 }],
+      ['minimax_pending', {}],
+      ['minimax_tasks', { limit: 3 }],
+      ['minimax_tail_sessions', { count: 2, perSession: 1 }],
+      ['minimax_search', { query: 'minimax', limit: 2 }],
+      ['minimax_windows', {}],
+      ['minimax_get_result', { timeoutSeconds: 2 }],
+    ];
+    for (const [name, args] of readOnlyCalls) {
+      const r = await send('tools/call', { name, arguments: args });
       const isErr = r.result?.isError === true;
-      let detail = '';
-      if (!isErr) {
-        try { detail = JSON.parse(r.result.content[0].text).dbPath || 'ok'; } catch { detail = 'ok'; }
-      } else {
+      let detail = 'ok';
+      if (isErr) {
         detail = r.result?.content?.[0]?.text?.slice(0, 120) || 'error';
+      } else {
+        try {
+          const parsed = JSON.parse(r.result.content[0].text);
+          detail = parsed.dbPath || `${Object.keys(parsed).slice(0, 3).join('/')}`;
+        } catch { detail = 'ok'; }
       }
       record(`tools/call ${name}`, !isErr, detail);
     }
+
+    // read_session 用序号和用 ID 两条路都要通
+    const byIndex = await send('tools/call', { name: 'minimax_read_session', arguments: { session: '1', limit: 1 } });
+    record('read_session 按序号', byIndex.result?.isError !== true);
+    const listRes = await send('tools/call', { name: 'minimax_list_sessions', arguments: { limit: 1 } });
+    let firstId = null;
+    try { firstId = JSON.parse(listRes.result.content[0].text).sessions[0].sessionId; } catch { /* 忽略 */ }
+    if (firstId) {
+      const byId = await send('tools/call', { name: 'minimax_read_session', arguments: { session: firstId, limit: 1 } });
+      record('read_session 按 ID', byId.result?.isError !== true);
+    }
+
+    // draft_answer：没有 pending 时对任意 requestId 调用必须给出可读的错误，不能崩
+    const draft = await send('tools/call', { name: 'minimax_draft_answer', arguments: { requestId: 'ask_nonexistent' } });
+    record('draft_answer 对不存在的 ID 报错', draft.result?.isError === true);
 
     const bad = await send('tools/call', { name: 'minimax_nope', arguments: {} });
     record('未知工具被拒绝', Boolean(bad.error), bad.error?.message);

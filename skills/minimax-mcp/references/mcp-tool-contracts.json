@@ -161,6 +161,45 @@
       "input": {},
       "output": "stopped, via",
       "sideEffects": "按 Esc 键"
+    },
+    {
+      "name": "minimax_draft_answer",
+      "intent": "读一条提问并生成建议答案（只读）",
+      "input": {
+        "requestId": "string（必填）"
+      },
+      "output": "requestId, status, title, steps[{stepId,question,options[{optionId,label,recommended}]}], suggestion{answers, replyPayload}",
+      "sideEffects": "none"
+    },
+    {
+      "name": "minimax_answer_question",
+      "intent": "提交一条提问的回答",
+      "input": {
+        "requestId": "string（必填）",
+        "selections": "[{stepId, optionIds}]，省略用 recommended 那份",
+        "preview": "boolean, 默认 true",
+        "force": "boolean, 默认 false",
+        "at": "\"x,y\" 第一个选项坐标"
+      },
+      "output": "preview{wouldSubmit} | submitted + pendingSelections + warning",
+      "sideEffects": "preview=true 无副作用；否则点 GUI。GUI 路径未用真实问卷验证"
+    },
+    {
+      "name": "minimax_new_task",
+      "intent": "新建任务页（⌘N）",
+      "input": {},
+      "output": "opened, newWindow, window{x,y,width,height}, hint",
+      "sideEffects": "按键；可能开出新窗口"
+    },
+    {
+      "name": "minimax_open_session",
+      "intent": "切换到某个会话",
+      "input": {
+        "session": "string（必填）",
+        "at": "\"x,y\"，不给则只返回状态不乱点"
+      },
+      "output": "opened, sessionId, clicked | hint",
+      "sideEffects": "给了 at 才点击"
     }
   ]
 }
