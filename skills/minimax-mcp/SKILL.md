@@ -105,10 +105,14 @@ recommended 不一样（我拿历史问卷验过，有一步用户选的就不�
 `minimax_answer_question` 默认 `preview:true`，返回 `wouldSubmit`（真实 reply payload）
 和 `clickPlan`（要按哪些文字去点），不动手。
 
-真提交要 `preview:false + force:true`。它会：按 clickPlan 用 OCR 找每个选项的文字并点击
-（找不到就缩短锚点重试，跨行渲染也不会瞎点）→ 找提交按钮（提交/确定/确认/发送/完成/Submit/Send）
-→ 点它 → **回数据库核对这条提问的状态是否真的从 pending 变成 answered**。
-`verified:false` 就是没提交成功，别信"我点了"。
+真提交要 `preview:false + force:true`。它会：
+
+1. 按 clickPlan 用 OCR 找每个选项的文字并点击（找不到就缩短锚点重试，跨行渲染也不会瞎点）；
+2. **立刻回数据库看状态**——有的问卷是"选中即提交"，点完就算答了，这时候不该再找按钮；
+3. 状态还没变才去找提交按钮（提交/确定/确认/发送/完成/Submit/Send），点了再核对一次。
+
+`verified:true` 表示数据库里这条提问已经离开 pending。`verified:false` 就是没提交成功，
+别信"我点了"。两种失败都只回报、不盲试：`missed[]` 是有选项没点到，`warning` 是点了但状态没变。
 
 `selections` 里 `optionIds` 和 `selectedOptionIds` 两种写法都收，单选给多个会被砍成一个并报错，
 未知 stepId / optionId 会点名可选值——不会静默忽略。

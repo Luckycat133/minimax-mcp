@@ -181,8 +181,8 @@
         "force": "boolean, 默认 false",
         "region": "可选 {x,y,width,height}，默认 MiniMax 主窗口"
       },
-      "output": "preview{wouldSubmit,clickPlan} | submitted + verified + status + clicked[] + missed[]",
-      "sideEffects": "preview=true 无副作用；否则用 OCR 定位选项并点击，最后点提交按钮"
+      "output": "preview{wouldSubmit,clickPlan} | submitted + verified + status + clicked[] | missed[] / warning",
+      "sideEffects": "preview=true 无副作用；否则 OCR 定位选项并点击，按需点提交按钮，全程核对数据库状态"
     },
     {
       "name": "minimax_new_task",

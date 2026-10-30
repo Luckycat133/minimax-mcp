@@ -356,6 +356,19 @@ function callTool(name, args = {}) {
           });
         }
 
+        // 有的问卷点完选项就直接提交了，没有独立的提交按钮。
+        // 所以先看数据库状态变没变，变了就别再去找按钮瞎点。
+        const afterClicks = db.questionnaireDetail(detail.requestId);
+        if (afterClicks && afterClicks.status !== 'pending') {
+          return ok({
+            submitted: true,
+            verified: true,
+            status: afterClicks.status,
+            clicked,
+            note: '点选项后状态已变成 ' + afterClicks.status + '，这类问卷是"选中即提交"，不需要再找提交按钮。',
+          });
+        }
+
         // 找提交按钮：常见文案都试一遍
         const submitLabels = ['提交', '确定', '确认', '发送', '完成', 'Submit', 'Send'];
         let submitHit = null;
@@ -366,9 +379,11 @@ function callTool(name, args = {}) {
         if (!submitHit) {
           return ok({
             submitted: false,
+            verified: false,
             clicked,
-            warning: '选项都点了，但没找到提交按钮（试过：' + submitLabels.join('/') + '）。' +
-              '用 minimax_find_text 或截图确认按钮文字，再用 minimax_click 点它。',
+            warning: '选项都点了，但数据库状态还是 pending，也没找到提交按钮（试过：' + submitLabels.join('/') + '）。' +
+              '可能是选中后还需要点别的地方，或者这个界面是"选中即提交但没生效"。' +
+              '用 minimax_screenshot 看当前界面，再用 minimax_click_text 点真正的确认按钮。',
           });
         }
         const submitOverlay = blockedByOverlay(submitHit.cx, submitHit.cy);
