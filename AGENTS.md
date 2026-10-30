@@ -98,3 +98,59 @@ npm run pack:mcpb    # 打 .mcpb bundle 并解包验证能 require
   "点了半天什么都没选中"，极难排查。
 - 单选题给多个选项会砍成一个并报错。
 - 提交后用 `questionnaire_requests.status` 是否离开 `pending` 做真验证，不信"我点了"。
+
+## 设计取舍（不是照搬任何现成东西，想改先看这里）
+
+### 1. brief 只输出"要处理的"，不平铺
+一开始的 `status` / `list_sessions` 是给程序看的，不是给人看的——137 个会话倒出来，
+读的人还得自己判断哪个重要。`brief` 把判断做在服务端：
+**等你决定 → 报错 → 卡住 → 在跑 → 刚完成**，安静的旧会话直接不输出。
+
+每条的 `why` 是"为什么值得看"，`next` 是"下一步调什么"。没有 `why` 的条目等于噪音。
+
+判据来自实测：
+- 会话 `status='error'` 带 `error_message`，这是真实失败（比如 Token 上限），必须报；
+- `status='started'` 只表示"这轮没结束"，不等于在生成——有 pending 提问时也是 started，
+  所以"等你决定"要排在它前面，否则会把它误报成"在跑"；
+- 后台任务失败**不改变会话状态**，光看会话列表必然漏掉，所以单独列 `taskFailures`。
+
+### 2. 三档风险分级，不是二档
+MCP 只有 `readOnlyHint` / `destructiveHint` 两个布尔，但"点一下界面"和"替你回句话"
+完全不同。内部用 read / ui / commit 三档，对外压成协议字段。
+`stop_generation` 归 ui 是刻意的：它是安全阀，加确认等于给刹车加锁。
+
+### 3. 审计是必需品，不是附加项
+GUI 操作没有 undo。`~/.minimax-mcp/audit.jsonl` 记 tool / level / 脱敏参数 / 耗时 / 目标坐标。
+审计失败绝不能影响主流程，所以 `record()` 全程 try-catch 吞异常。
+
+### 4. 提交后一律回数据库核对，不信"我点了"
+`send_message` 查 `local_runtime_message_rows`，`answer_question` 查
+`questionnaire_requests.status`。返回里的 `verified` 是数据库事实。
+
+## 设计取舍（不是照搬任何现成东西，想改先看这里）
+
+### 1. brief 只输出"要处理的"，不平铺
+一开始的 `status` / `list_sessions` 是给程序看的，不是给人看的——137 个会话倒出来，
+读的人还得自己判断哪个重要。`brief` 把判断做在服务端：
+**等你决定 → 报错 → 卡住 → 在跑 → 刚完成**，安静的旧会话直接不输出。
+
+每条的 `why` 是"为什么值得看"，`next` 是"下一步调什么"。没有 `why` 的条目等于噪音。
+
+判据来自实测：
+- 会话 `status='error'` 带 `error_message`，这是真实失败（比如 Token 上限），必须报；
+- `status='started'` 只表示"这轮没结束"，不等于在生成——有 pending 提问时也是 started，
+  所以"等你决定"要排在它前面，否则会把它误报成"在跑"；
+- 后台任务失败**不改变会话状态**，光看会话列表必然漏掉，所以单独列 `taskFailures`。
+
+### 2. 三档风险分级，不是二档
+MCP 只有 `readOnlyHint` / `destructiveHint` 两个布尔，但"点一下界面"和"替你回句话"
+完全不同。内部用 read / ui / commit 三档，对外压成协议字段。
+`stop_generation` 归 ui 是刻意的：它是安全阀，加确认等于给刹车加锁。
+
+### 3. 审计是必需品，不是附加项
+GUI 操作没有 undo。`~/.minimax-mcp/audit.jsonl` 记 tool / level / 脱敏参数 / 耗时 / 目标坐标。
+审计失败绝不能影响主流程，所以 `record()` 全程 try-catch 吞异常。
+
+### 4. 提交后一律回数据库核对，不信"我点了"
+`send_message` 查 `local_runtime_message_rows`，`answer_question` 查
+`questionnaire_requests.status`。返回里的 `verified` 是数据库事实。

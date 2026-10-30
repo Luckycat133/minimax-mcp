@@ -7,6 +7,18 @@
   },
   "tools": [
     {
+      "name": "minimax_brief",
+      "intent": "态势快照：只输出需要处理的事，按 等你决定→报错→卡住→在跑→刚完成 排序",
+      "input": {
+        "stalledMinutes": "integer, 默认 10",
+        "activeMinutes": "integer, 默认 10",
+        "finishedMinutes": "integer, 默认 60",
+        "limit": "integer, 默认 200"
+      },
+      "output": "headline, counts, items[{kind,priority,title,why,next,age}], taskFailures[], quietSessions",
+      "sideEffects": "none（纯读数据库）"
+    },
+    {
       "name": "minimax_status",
       "intent": "本地状态总览",
       "input": {},

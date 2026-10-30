@@ -18,12 +18,13 @@ Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.m
 
 ## 工具面
 
-契约版本 1，22 个工具，每个单一意图。
+契约版本 1，23 个工具，每个单一意图。
 
 只读（不改任何东西）：
 
 | 工具 | 作用 |
 |---|---|
+| `minimax_brief` | **态势快照**：只输出需要处理的事，按优先级排序，每条带原因和下一步 |
 | `minimax_status` | 数据库位置、会话数、消息数、最后活动、运行中任务数 |
 | `minimax_list_sessions` | 按最近活动列出会话 |
 | `minimax_read_session` | 读某个会话的消息（可带思考过程） |
@@ -48,6 +49,13 @@ Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.m
 | `minimax_new_task` / `minimax_open_session` | 新建任务页 / 按标题切换会话 |
 | `minimax_click_text` | 找到某段文字并点它（比手算坐标可靠） |
 | `minimax_click` / `minimax_type` / `minimax_key` | 基础键鼠原语 |
+
+## 三档风险分级
+
+工具带 MCP 标准 `annotations`，内部按三档设计：`read`（只读）→ `ui`（只动界面，可逆）→
+`commit`（改变对话内容，不可逆）。`commit` 档必须至少有一道默认关闭的闸门，契约测试盯着。
+
+所有 `ui` / `commit` 动作写审计到 `~/.minimax-mcp/audit.jsonl`，参数自动脱敏。
 
 ## 为什么需要 OCR
 

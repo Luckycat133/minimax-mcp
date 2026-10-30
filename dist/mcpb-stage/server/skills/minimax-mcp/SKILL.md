@@ -21,6 +21,21 @@ MiniMax Code 是 Electron 应用，没有本地 HTTP API，跨进程 AX 树也�
 
 ## 先看，再动
 
+**第一件事永远先调 `minimax_brief`**，不要一上来 `minimax_list_sessions` 把 137 个会话倒出来。
+
+```
+minimax_brief                                  # 只看"需要你处理的事"，按优先级排好
+minimax_brief {stalledMinutes: 30}             # 放宽卡住判定，少一点噪音
+```
+
+它返回一句话总结 + 一个队列，每条带 `why`（为什么值得看）和 `next`（下一步调什么）。
+队列顺序就是优先级：**等你决定 → 报错 → 卡住 → 在跑 → 刚完成**，安静的旧会话不输出。
+`taskFailures` 单独列后台任务失败——这类失败不改变会话状态，光看会话列表会漏掉。
+
+只有 brief 里没提到、但你确实要查的会话，才去 `list_sessions` / `read_session`。
+
+## 先看，再动
+
 巡检类诉求（谁在等回答、谁有结果、谁卡住）全程只读，随便用：
 
 ```
@@ -105,10 +120,14 @@ recommended 不一样（我拿历史问卷验过，有一步用户选的就不�
 `minimax_answer_question` 默认 `preview:true`，返回 `wouldSubmit`（真实 reply payload）
 和 `clickPlan`（要按哪些文字去点），不动手。
 
-真提交要 `preview:false + force:true`。它会：按 clickPlan 用 OCR 找每个选项的文字并点击
-（找不到就缩短锚点重试，跨行渲染也不会瞎点）→ 找提交按钮（提交/确定/确认/发送/完成/Submit/Send）
-→ 点它 → **回数据库核对这条提问的状态是否真的从 pending 变成 answered**。
-`verified:false` 就是没提交成功，别信"我点了"。
+真提交要 `preview:false + force:true`。它会：
+
+1. 按 clickPlan 用 OCR 找每个选项的文字并点击（找不到就缩短锚点重试，跨行渲染也不会瞎点）；
+2. **立刻回数据库看状态**——有的问卷是"选中即提交"，点完就算答了，这时候不该再找按钮；
+3. 状态还没变才去找提交按钮（提交/确定/确认/发送/完成/Submit/Send），点了再核对一次。
+
+`verified:true` 表示数据库里这条提问已经离开 pending。`verified:false` 就是没提交成功，
+别信"我点了"。两种失败都只回报、不盲试：`missed[]` 是有选项没点到，`warning` 是点了但状态没变。
 
 `selections` 里 `optionIds` 和 `selectedOptionIds` 两种写法都收，单选给多个会被砍成一个并报错，
 未知 stepId / optionId 会点名可选值——不会静默忽略。
@@ -152,6 +171,38 @@ minimax_click {x: 678, y: 597}
 
 `minimax_key` 是通用按键（`{"key":"n","modifiers":["cmd"]}` = ⌘N），
 `minimax_stop_generation` 是按 Esc 停当前这轮生成。
+
+## 风险分级：三档，不是两档
+
+每个工具都带 MCP 标准的 `annotations`，但内部分了三档——因为"点一下界面"和
+"替你回一句话"完全不是一回事：
+
+| 档位 | readOnlyHint | destructiveHint | 哪些工具 |
+|---|---|---|---|
+| `read` | true | false | brief / status / list / read / tail / search / pending / draft_answer / tasks / windows / find_text / get_result |
+| `ui` | false | false | activate / screenshot / new_task / open_session / click / click_text / type / key / stop_generation |
+| `commit` | false | true | send_message / answer_question |
+
+**`stop_generation` 故意归 ui 而不是 commit**：它只按 Esc 截断当前这轮，不改对话历史，
+用户随时能重发。标成 destructive 会让宿主每次弹确认——而"停下来"恰恰是出问题时最该
+顺手能做的动作，给刹车加锁没意义。防误触靠的是"MiniMax 必须在前台"那道校验。
+
+`commit` 档的工具必须至少有一道默认关闭的闸门（`send:false` / `force:false` / `preview:true`），
+这条有契约测试盯着，改不掉。
+
+## 审计
+
+所有 `ui` / `commit` 动作都会往 `~/.minimax-mcp/audit.jsonl` 写一行：
+
+```
+{"at":"...","tool":"minimax_click_text","level":"ui","args":{...},"ok":true,"ms":981,"target":{"at":[602,499]}}
+```
+
+`args` 会脱敏：长文本截到 80 字并标注原长度，对象只留 `{…}`，数组只留项数。
+超过 2MB 自动滚成 `audit.jsonl.1`。
+
+为什么需要：GUI 操作没有 undo。事后想弄清"刚才点了哪里、当时是什么状态"，只能靠记录。
+排障时直接 `tail ~/.minimax-mcp/audit.jsonl`。
 
 ## 硬规则
 

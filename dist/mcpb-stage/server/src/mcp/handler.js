@@ -9,6 +9,9 @@ const db = require('../gateway/db');
 const gui = require('../gateway/gui');
 const ocr = require('../gateway/ocr');
 const qn = require('./questionnaire');
+const brief = require('../gateway/brief');
+const audit = require('../gateway/audit');
+const ann = require('./annotations');
 const tasks = require('./tasks');
 
 /** 客户端是否协商了 Tasks 扩展。由 stdio-server 在 initialize 时设置。 */
@@ -16,9 +19,9 @@ let tasksEnabled = false;
 function setTasksEnabled(v) { tasksEnabled = v === true; }
 
 const READONLY = new Set([
-  'minimax_status', 'minimax_list_sessions', 'minimax_read_session',
-  'minimax_tail_sessions', 'minimax_search', 'minimax_pending',
-  'minimax_tasks', 'minimax_windows', 'minimax_find_text',
+  'minimax_brief', 'minimax_status', 'minimax_list_sessions', 'minimax_read_session',
+  'minimax_tail_sessions', 'minimax_search', 'minimax_pending', 'minimax_draft_answer',
+  'minimax_tasks', 'minimax_windows', 'minimax_find_text', 'minimax_get_result',
 ]);
 
 function ok(payload) {
@@ -75,9 +78,17 @@ function findByAnchor(anchor, region) {
   return null;
 }
 
-function callTool(name, args = {}) {
+function dispatch(name, args = {}) {
   try {
     switch (name) {
+      case 'minimax_brief':
+        return ok(brief.brief({
+          stalledMinutes: args.stalledMinutes,
+          activeMinutes: args.activeMinutes,
+          finishedMinutes: args.finishedMinutes,
+          limit: args.limit,
+        }));
+
       case 'minimax_status':
         return ok(db.status());
 
@@ -356,6 +367,19 @@ function callTool(name, args = {}) {
           });
         }
 
+        // 有的问卷点完选项就直接提交了，没有独立的提交按钮。
+        // 所以先看数据库状态变没变，变了就别再去找按钮瞎点。
+        const afterClicks = db.questionnaireDetail(detail.requestId);
+        if (afterClicks && afterClicks.status !== 'pending') {
+          return ok({
+            submitted: true,
+            verified: true,
+            status: afterClicks.status,
+            clicked,
+            note: '点选项后状态已变成 ' + afterClicks.status + '，这类问卷是"选中即提交"，不需要再找提交按钮。',
+          });
+        }
+
         // 找提交按钮：常见文案都试一遍
         const submitLabels = ['提交', '确定', '确认', '发送', '完成', 'Submit', 'Send'];
         let submitHit = null;
@@ -366,9 +390,11 @@ function callTool(name, args = {}) {
         if (!submitHit) {
           return ok({
             submitted: false,
+            verified: false,
             clicked,
-            warning: '选项都点了，但没找到提交按钮（试过：' + submitLabels.join('/') + '）。' +
-              '用 minimax_find_text 或截图确认按钮文字，再用 minimax_click 点它。',
+            warning: '选项都点了，但数据库状态还是 pending，也没找到提交按钮（试过：' + submitLabels.join('/') + '）。' +
+              '可能是选中后还需要点别的地方，或者这个界面是"选中即提交但没生效"。' +
+              '用 minimax_screenshot 看当前界面，再用 minimax_click_text 点真正的确认按钮。',
           });
         }
         const submitOverlay = blockedByOverlay(submitHit.cx, submitHit.cy);
@@ -537,6 +563,54 @@ function callTool(name, args = {}) {
     }
   } catch (err) {
     return fail(`${err && err.message ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * 对外入口：先分发，再按风险级别决定要不要落审计。
+ * 审计放在最外层，保证"调了但抛错"也留下记录——那种情况恰恰最需要回溯。
+ */
+function callTool(name, args = {}) {
+  const started = Date.now();
+  let result;
+  try {
+    result = dispatch(name, args);
+  } catch (err) {
+    if (ann.needsAudit(name)) {
+      audit.record({
+        tool: name,
+        level: ann.levelOf(name),
+        args,
+        ok: false,
+        ms: Date.now() - started,
+        error: err && err.message ? err.message : String(err),
+      });
+    }
+    throw err;
+  }
+  if (ann.needsAudit(name)) {
+    const payload = parsePayload(result);
+    audit.record({
+      tool: name,
+      level: ann.levelOf(name),
+      args,
+      ok: result && result.isError !== true,
+      ms: Date.now() - started,
+      target: payload && (payload.at || payload.clicked || payload.sessionId)
+        ? { at: payload.at, clicked: payload.clicked, sessionId: payload.sessionId }
+        : undefined,
+      error: result && result.isError === true ? (payload && payload.error) : undefined,
+    });
+  }
+  return result;
+}
+
+/** 从工具返回的 JSON 文本里取几个字段，取不到就算了。 */
+function parsePayload(result) {
+  try {
+    return JSON.parse(result.content[0].text);
+  } catch {
+    return null;
   }
 }
 

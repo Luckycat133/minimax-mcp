@@ -145,6 +145,88 @@ check('Tasks 存储：创建/读取/取消/清理', () => {
   assert.ok(t.prune(0) >= 1, 'retainHours=0 必须清掉终态任务');
 });
 
+check('每个工具都带 MCP annotations', () => {
+  for (const t of TOOLS) {
+    assert.ok(t.annotations, `${t.name} 缺 annotations`);
+    for (const k of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
+      assert.strictEqual(typeof t.annotations[k], 'boolean', `${t.name}.annotations.${k} 必须是布尔`);
+    }
+    assert.ok(t.title && t.title.length > 0, `${t.name} 缺 title`);
+  }
+});
+
+check('风险分级表覆盖全部工具（没登记的一律按最危险处理）', () => {
+  const ann = require(path.join(ROOT, 'src/mcp/annotations'));
+  const missing = TOOL_NAMES.filter((n) => !ann.LEVEL[n]);
+  assert.deepStrictEqual(missing, [], `这些工具没登记风险级别: ${missing.join(', ')}`);
+  assert.strictEqual(ann.levelOf('不存在的工具'), 'commit', '未登记必须默认最危险');
+});
+
+check('只读工具不许标 destructive', () => {
+  const { READONLY } = require(path.join(ROOT, 'src/mcp/handler'));
+  for (const t of TOOLS) {
+    if (READONLY.has(t.name)) {
+      assert.strictEqual(t.annotations.readOnlyHint, true, `${t.name} 在 READONLY 里但没标只读`);
+      assert.strictEqual(t.annotations.destructiveHint, false, `${t.name} 只读却标了 destructive`);
+    }
+  }
+});
+
+check('READONLY 集合与 annotations 一致', () => {
+  const { READONLY } = require(path.join(ROOT, 'src/mcp/handler'));
+  const ann = require(path.join(ROOT, 'src/mcp/annotations'));
+  for (const n of TOOL_NAMES) {
+    const isRead = ann.levelOf(n) === 'read';
+    assert.strictEqual(READONLY.has(n), isRead, `${n}: READONLY=${READONLY.has(n)} 但分级是 ${ann.levelOf(n)}`);
+  }
+});
+
+check('commit 级工具默认都不动作', () => {
+  const ann = require(path.join(ROOT, 'src/mcp/annotations'));
+  for (const t of TOOLS) {
+    if (ann.levelOf(t.name) !== 'commit') continue;
+    const props = t.inputSchema.properties || {};
+
+    // 硬规则：任何情况下 send / force 都不许默认 true
+    for (const k of ['send', 'force']) {
+      if (props[k] && typeof props[k].default === 'boolean') {
+        assert.strictEqual(props[k].default, false, `${t.name}.${k} 默认必须是 false`);
+      }
+    }
+
+    // 软规则：每个 commit 工具至少要有一道默认关闭的闸门。
+    //   - preview 默认 true，或者
+    //   - send / force 默认 false（有其一即可，send_message 用的是 send 那道闸）
+    const gates = [];
+    if (props.preview && props.preview.default === true) gates.push('preview:true');
+    if (props.send && props.send.default === false) gates.push('send:false');
+    if (props.force && props.force.default === false) gates.push('force:false');
+    assert.ok(gates.length > 0, `${t.name} 是 commit 级但没有任何默认关闭的闸门`);
+  }
+});
+
+check('审计覆盖所有会动东西的工具', () => {
+  const ann = require(path.join(ROOT, 'src/mcp/annotations'));
+  for (const n of TOOL_NAMES) {
+    const level = ann.levelOf(n);
+    if (level === 'read') {
+      assert.strictEqual(ann.needsAudit(n), false, `${n} 只读不该写审计`);
+    } else {
+      assert.strictEqual(ann.needsAudit(n), true, `${n} 会动东西但没审计`);
+    }
+  }
+});
+
+check('审计会脱敏长文本', () => {
+  const audit = require(path.join(ROOT, 'src/gateway/audit'));
+  const out = audit.sanitizeArgs({ message: 'x'.repeat(200), send: true, at: '1,2', nested: { a: 1 }, list: [1, 2] });
+  assert.ok(out.message.length < 100, '长文本必须截断');
+  assert.strictEqual(out.send, true);
+  assert.strictEqual(out.at, '1,2');
+  assert.strictEqual(out.nested, '{…}');
+  assert.strictEqual(out.list, '[2 项]');
+});
+
 const failed = results.filter((r) => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} 通过`);
 process.exit(failed === 0 ? 0 : 1);

@@ -7,6 +7,18 @@
   },
   "tools": [
     {
+      "name": "minimax_brief",
+      "intent": "态势快照：只输出需要处理的事，按 等你决定→报错→卡住→在跑→刚完成 排序",
+      "input": {
+        "stalledMinutes": "integer, 默认 10",
+        "activeMinutes": "integer, 默认 10",
+        "finishedMinutes": "integer, 默认 60",
+        "limit": "integer, 默认 200"
+      },
+      "output": "headline, counts, items[{kind,priority,title,why,next,age}], taskFailures[], quietSessions",
+      "sideEffects": "none（纯读数据库）"
+    },
+    {
       "name": "minimax_status",
       "intent": "本地状态总览",
       "input": {},
@@ -181,8 +193,8 @@
         "force": "boolean, 默认 false",
         "region": "可选 {x,y,width,height}，默认 MiniMax 主窗口"
       },
-      "output": "preview{wouldSubmit,clickPlan} | submitted + verified + status + clicked[] + missed[]",
-      "sideEffects": "preview=true 无副作用；否则用 OCR 定位选项并点击，最后点提交按钮"
+      "output": "preview{wouldSubmit,clickPlan} | submitted + verified + status + clicked[] | missed[] / warning",
+      "sideEffects": "preview=true 无副作用；否则 OCR 定位选项并点击，按需点提交按钮，全程核对数据库状态"
     },
     {
       "name": "minimax_new_task",

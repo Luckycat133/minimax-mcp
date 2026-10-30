@@ -8,6 +8,23 @@
 
 const TOOLS = [
   {
+    name: 'minimax_brief',
+    description:
+      '态势快照：只告诉你「现在需要你看的事」，不把所有会话平铺出来。' +
+      '按 等你决定 → 报错 → 卡住 → 在跑 → 刚完成 排序，每条带一句原因和下一步该调什么。' +
+      '纯读数据库，随时可调。第一次接触 MiniMax 状态时先调这个，不要一上来就 list_sessions。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        stalledMinutes: { type: 'integer', minimum: 1, default: 10, description: '末条是用户消息、超过这么久没回就算卡住' },
+        activeMinutes: { type: 'integer', minimum: 1, default: 10, description: '这么久内有新消息就算在跑' },
+        finishedMinutes: { type: 'integer', minimum: 1, default: 60, description: '这么久内跑完算刚完成' },
+        limit: { type: 'integer', minimum: 1, maximum: 500, default: 200, description: '扫多少个最近会话' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'minimax_status',
     description: 'MiniMax Code 本地状态：数据库位置、会话数、消息数、最后活动时间、运行中的后台任务数。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -302,6 +319,10 @@ const TOOLS = [
   },
 ];
 
-const TOOL_NAMES = TOOLS.map((t) => t.name);
+const { annotate } = require('./annotations');
 
-module.exports = { TOOLS, TOOL_NAMES };
+// 统一打上 title + MCP annotations（只读/可逆/提交三档见 annotations.js）
+const ANNOTATED = annotate(TOOLS);
+const TOOL_NAMES = ANNOTATED.map((t) => t.name);
+
+module.exports = { TOOLS: ANNOTATED, TOOL_NAMES };

@@ -206,6 +206,35 @@ function main() {
     record('click_text 找不到就拒绝点击', ct.result?.isError === true,
       ct.result?.content?.[0]?.text?.slice(0, 90) || '竟然点了');
 
+    // brief：必须是"注意力队列"形态，不是平铺列表
+    const br = await send('tools/call', { name: 'minimax_brief', arguments: { limit: 50 } });
+    let brOk = br.result?.isError !== true;
+    let brDetail = '';
+    if (brOk) {
+      const parsed = JSON.parse(br.result.content[0].text);
+      brOk = typeof parsed.headline === 'string'
+        && Array.isArray(parsed.items)
+        && Array.isArray(parsed.taskFailures)
+        && parsed.scannedSessions > 0
+        && parsed.items.every((it) => it.kind && it.why && it.next && it.priority);
+      brDetail = parsed.headline.slice(0, 70);
+    } else {
+      brDetail = br.result?.content?.[0]?.text?.slice(0, 100) || 'error';
+    }
+    record('brief 输出注意力队列', brOk, brDetail);
+
+    // 审计：动界面的工具必须留下记录，只读工具不该留
+    const audit = require(path.join(__dirname, '..', 'src/gateway/audit'));
+    const beforeCount = audit.recent(1000).length;
+    await send('tools/call', { name: 'minimax_screenshot', arguments: { name: 'audit_probe', mode: 'region', x: 0, y: 0, width: 20, height: 20 } });
+    const afterUi = audit.recent(1000).length;
+    record('动界面会写审计', afterUi > beforeCount, `${beforeCount} → ${afterUi}`);
+
+    const beforeRead = audit.recent(1000).length;
+    await send('tools/call', { name: 'minimax_status', arguments: {} });
+    const afterRead = audit.recent(1000).length;
+    record('只读不写审计', afterRead === beforeRead, `${beforeRead} → ${afterRead}`);
+
     const failed = results.filter((r) => !r.pass).length;
     console.log(`\n${results.length - failed}/${results.length} 通过`);
     child.kill();
