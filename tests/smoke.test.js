@@ -166,6 +166,46 @@ function main() {
     }
     record('get_result 可收回结果', grOk, grDetail);
 
+    // OCR：找一段绝不存在的文字，必须是 0 命中且不报错（不能瞎给一个坐标）
+    const nf = await send('tools/call', {
+      name: 'minimax_find_text',
+      arguments: { text: 'zzz-绝对不存在的文字-qqq', refresh: true },
+    });
+    let nfOk = nf.result?.isError !== true;
+    let nfDetail = '';
+    if (nfOk) {
+      const parsed = JSON.parse(nf.result.content[0].text);
+      nfOk = parsed.total === 0 && parsed.picked === null && parsed.scanned > 0;
+      nfDetail = `扫了 ${parsed.scanned} 段，0 命中`;
+    } else {
+      nfDetail = nf.result?.content?.[0]?.text?.slice(0, 120) || 'error';
+    }
+    record('find_text 找不到时不瞎给坐标', nfOk, nfDetail);
+
+    // OCR：找一段必然存在的文字（MiniMax 窗口标题），必须能定位到
+    const ft = await send('tools/call', {
+      name: 'minimax_find_text',
+      arguments: { text: '新建任务', refresh: true },
+    });
+    let ftOk = ft.result?.isError !== true;
+    let ftDetail = '';
+    if (ftOk) {
+      const parsed = JSON.parse(ft.result.content[0].text);
+      ftOk = parsed.total >= 1 && typeof parsed.picked?.cx === 'number' && parsed.picked.cx > 0;
+      ftDetail = parsed.total ? `${parsed.total} 命中 @(${parsed.picked.cx},${parsed.picked.cy})` : '0 命中';
+    } else {
+      ftDetail = ft.result?.content?.[0]?.text?.slice(0, 120) || 'error';
+    }
+    record('find_text 能定位真实控件', ftOk, ftDetail);
+
+    // click_text：目标不存在时必须报错且不点击
+    const ct = await send('tools/call', {
+      name: 'minimax_click_text',
+      arguments: { text: 'zzz-绝对不存在的按钮-qqq' },
+    });
+    record('click_text 找不到就拒绝点击', ct.result?.isError === true,
+      ct.result?.content?.[0]?.text?.slice(0, 90) || '竟然点了');
+
     const failed = results.filter((r) => !r.pass).length;
     console.log(`\n${results.length - failed}/${results.length} 通过`);
     child.kill();

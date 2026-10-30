@@ -176,13 +176,13 @@
       "intent": "提交一条提问的回答",
       "input": {
         "requestId": "string（必填）",
-        "selections": "[{stepId, optionIds}]，省略用 recommended 那份",
+        "selections": "[{stepId, optionIds|selectedOptionIds, selectedOther?, otherText?}]，省略则用 recommended 那份",
         "preview": "boolean, 默认 true",
         "force": "boolean, 默认 false",
-        "at": "\"x,y\" 第一个选项坐标"
+        "region": "可选 {x,y,width,height}，默认 MiniMax 主窗口"
       },
-      "output": "preview{wouldSubmit} | submitted + pendingSelections + warning",
-      "sideEffects": "preview=true 无副作用；否则点 GUI。GUI 路径未用真实问卷验证"
+      "output": "preview{wouldSubmit,clickPlan} | submitted + verified + status + clicked[] + missed[]",
+      "sideEffects": "preview=true 无副作用；否则用 OCR 定位选项并点击，最后点提交按钮"
     },
     {
       "name": "minimax_new_task",
@@ -193,13 +193,38 @@
     },
     {
       "name": "minimax_open_session",
-      "intent": "切换到某个会话",
+      "intent": "切换到某个会话（默认按标题在侧栏 OCR 定位）",
       "input": {
         "session": "string（必填）",
-        "at": "\"x,y\"，不给则只返回状态不乱点"
+        "at": "\"x,y\"，可选；给了就不做 OCR"
       },
-      "output": "opened, sessionId, clicked | hint",
-      "sideEffects": "给了 at 才点击"
+      "output": "opened, sessionId, clicked[x,y], matchedText | opened:false + tried + hint",
+      "sideEffects": "鼠标点击一次（只在找到目标时）"
+    },
+    {
+      "name": "minimax_find_text",
+      "intent": "按文字在屏幕上定位元素，返回屏幕点坐标（macOS Vision OCR）",
+      "input": {
+        "text": "string（必填）",
+        "mode": "contains|exact|prefix, 默认 contains",
+        "index": "integer, 默认 0",
+        "region": "可选 {x,y,width,height}",
+        "refresh": "boolean, 默认 true"
+      },
+      "output": "query, total, picked{cx,cy,text,conf}, matches[], scanned, region",
+      "sideEffects": "none（只截屏识别，不点不动）"
+    },
+    {
+      "name": "minimax_click_text",
+      "intent": "找到屏幕上的某段文字并点它的中心",
+      "input": {
+        "text": "string（必填）",
+        "mode": "contains|exact|prefix, 默认 contains",
+        "index": "integer, 默认 0",
+        "region": "可选 {x,y,width,height}"
+      },
+      "output": "clicked, at[x,y], confidence, total",
+      "sideEffects": "鼠标点击一次；有遮挡检查"
     }
   ]
 }

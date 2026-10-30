@@ -44,6 +44,21 @@ check('辅助功能权限', perm.ok && /已授权/.test(perm.out), perm.out.spli
 const app = '/Applications/MiniMax Code.app';
 check('MiniMax Code 已安装', fs.existsSync(app), app);
 
+// OCR：Swift 工具链 + Vision 识别能否真的跑出字
+const ocrSrc = path.join(__dirname, '..', 'scripts', 'ocr.swift');
+check('ocr.swift 存在', fs.existsSync(ocrSrc), ocrSrc);
+let ocrOk = false;
+let ocrDetail = '未测试';
+try {
+  const ocr = require(path.join(__dirname, '..', 'src/gateway/ocr'));
+  ocr.ensureBinary();
+  ocrOk = true;
+  ocrDetail = `${ocr.BIN} 已就绪`;
+} catch (err) {
+  ocrDetail = String(err.message).slice(0, 160);
+}
+check('OCR 可编译可用', ocrOk, ocrDetail);
+
 let failed = 0;
 for (const c of checks) {
   if (!c.pass) failed += 1;

@@ -18,7 +18,7 @@ Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.m
 
 ## 工具面
 
-契约版本 1，14 个工具，每个单一意图。
+契约版本 1，22 个工具，每个单一意图。
 
 只读（不改任何东西）：
 
@@ -30,8 +30,10 @@ Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.m
 | `minimax_tail_sessions` | 最近 N 个会话各自最新的几条 |
 | `minimax_search` | 跨会话全文搜索 |
 | `minimax_pending` | Agent 发出、等你回答的提问 |
+| `minimax_draft_answer` | 读一条提问 + 生成建议答案（只读） |
 | `minimax_tasks` | 后台任务状态 |
 | `minimax_windows` | MiniMax 窗口几何信息 |
+| `minimax_find_text` | 按文字定位屏幕元素，返回屏幕点坐标（Vision OCR） |
 
 控制（会真的动鼠标键盘）：
 
@@ -40,13 +42,25 @@ Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.m
 | `minimax_activate` | 切到前台并回报前台窗口 |
 | `minimax_screenshot` | 全屏或区域截图 |
 | `minimax_send_message` | 往输入框粘贴指令，可选回车，**发完自动核对数据库** |
+| `minimax_get_result` | 等这轮跑完并收回最终回复 |
+| `minimax_stop_generation` | 按 Esc 停当前这轮生成 |
+| `minimax_answer_question` | 提交问卷答案（默认只 preview，提交后核对数据库状态） |
+| `minimax_new_task` / `minimax_open_session` | 新建任务页 / 按标题切换会话 |
+| `minimax_click_text` | 找到某段文字并点它（比手算坐标可靠） |
 | `minimax_click` / `minimax_type` / `minimax_key` | 基础键鼠原语 |
+
+## 为什么需要 OCR
+
+MiniMax 是 Electron：读不到控件树，AppleScript 被沙箱拦。想按"按钮文字"点东西，
+只能靠屏幕文字识别。`scripts/ocr.swift` 用 macOS Vision（中英文都认），编译成
+`.cache/ocr`，首次使用时自动构建。这也是 `minimax_answer_question` 能自动点选项的基础。
 
 ## 运行要求
 
 - macOS（需要「辅助功能」和「屏幕录制」两项权限，给运行 MCP 的那个 App）
 - Node.js 22+
 - `python3`、`sqlite3`（系统自带）
+- Swift 工具链（`xcode-select --install`）——只用于编译 OCR 助手，编译一次即可
 - MiniMax Code 已安装并登录
 
 零第三方依赖：SQLite 走系统 `sqlite3` CLI，GUI 走 `scripts/mac_gui.py`。

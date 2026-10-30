@@ -73,3 +73,28 @@ npm run pack:mcpb    # 打 .mcpb bundle 并解包验证能 require
 - `cp -R` 不建父目录，目标父目录不存在会 ENOENT，先 `mkdir -p`。
 - `npm pack` 会把 `dist/` 一起塞进去，所以 `dist/` 必须留在 `.gitignore` 里，
   且构建脚本要显式排除。
+
+## OCR 层（2026-10-31 加）
+
+`scripts/ocr.swift` → `.cache/ocr`，macOS Vision，`recognitionLanguages = ["zh-Hans","en-US"]`。
+`src/gateway/ocr.js` 包一层：`read(region)` / `find(query, opts)` / `pickLeftmostColumn`。
+
+踩过的坑：
+
+1. **同一个标题会出现两次**（侧栏列表 + 主区域顶栏）。直接取匹配度最高的会点到顶栏，
+   把标题变成选中态。必须取**最左那一列**再取最上面一个（`pickLeftmostColumn`）。
+   这条有单测盯着，别改回去。
+2. **`prefix` 模式不能兜底到 `contains`**。第一版把 `t.includes(q)` 写在 mode 判断外面，
+   导致 prefix 模式照样匹配中间片段。匹配规则错了会点错按钮，比找不到更危险。
+3. **长锚点跨行必挂**。选项文案常换行渲染，OCR 会切成两条观测。`findByAnchor` 会按
+   18 → 12 → 8 → 5 逐级缩短重试。
+4. **Vision 的 y 轴向上**，屏幕坐标 y 向下，换算要用 `1 - bbox.maxY`。
+5. **Vision 不认纯图标**。没有文字的按钮只能退回截图 + 手算坐标。
+
+## 问卷答案校验（src/mcp/questionnaire.js）
+
+- `optionIds` 和 `selectedOptionIds` 两种写法都收（历史数据用后者）。
+- 未知 stepId / optionId 一律报错并点名可选值，**不静默忽略**——静默忽略的表现是
+  "点了半天什么都没选中"，极难排查。
+- 单选题给多个选项会砍成一个并报错。
+- 提交后用 `questionnaire_requests.status` 是否离开 `pending` 做真验证，不信"我点了"。

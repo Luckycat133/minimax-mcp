@@ -267,6 +267,37 @@ function recentlyTouchedSessions(limit = 3) {
   }));
 }
 
+/** 单个会话的标题等元信息，用于在侧栏里按文字定位。 */
+function sessionMeta(sessionId) {
+  const row = one(
+    'select session_id, title, status, updated_at_ms, archived ' +
+    'from local_runtime_sessions where session_id = ? limit 1',
+    [sessionId]
+  );
+  if (!row) {
+    // 会话可能还没写进 sessions 表，退回用首条用户消息当标题
+    const first = one(
+      "select json_extract(data_json,'$.msg_content') as c from local_runtime_message_rows " +
+      "where session_id = ? and role = 'user' order by id limit 1",
+      [sessionId]
+    );
+    return { sessionId, title: '', firstUserMessage: clip(first?.c, 80), status: null };
+  }
+  const first = one(
+    "select json_extract(data_json,'$.msg_content') as c from local_runtime_message_rows " +
+    "where session_id = ? and role = 'user' order by id limit 1",
+    [sessionId]
+  );
+  return {
+    sessionId: row.session_id,
+    title: row.title || '',
+    status: row.status,
+    archived: Number(row.archived || 0),
+    lastActivityMs: Number(row.updated_at_ms),
+    firstUserMessage: clip(first?.c, 80),
+  };
+}
+
 /**
  * 等一个会话把当前这轮跑完，返回最终的助手回复。
  * 判定"跑完"用两个信号：会话状态回到 idle，且最后一条 assistant 消息有正文。
@@ -417,6 +448,7 @@ module.exports = {
   status,
   listSessions,
   recentlyTouchedSessions,
+  sessionMeta,
   resolveSession,
   readSession,
   tailSessions,

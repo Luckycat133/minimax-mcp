@@ -7,6 +7,8 @@
 
 const db = require('../gateway/db');
 const gui = require('../gateway/gui');
+const ocr = require('../gateway/ocr');
+const qn = require('./questionnaire');
 const tasks = require('./tasks');
 
 /** 客户端是否协商了 Tasks 扩展。由 stdio-server 在 initialize 时设置。 */
@@ -16,7 +18,7 @@ function setTasksEnabled(v) { tasksEnabled = v === true; }
 const READONLY = new Set([
   'minimax_status', 'minimax_list_sessions', 'minimax_read_session',
   'minimax_tail_sessions', 'minimax_search', 'minimax_pending',
-  'minimax_tasks', 'minimax_windows',
+  'minimax_tasks', 'minimax_windows', 'minimax_find_text',
 ]);
 
 function ok(payload) {
@@ -53,6 +55,24 @@ function blockedByOverlay(x, y) {
   if (!hit) return null;
   if (hit.app === gui.APP) return null;
   return hit;
+}
+
+/**
+ * 按锚点找文字，找不到就缩短再试。
+ * 原因：选项文案常常换行渲染，OCR 会把它切成两条观测，长锚点跨行必然匹配不上。
+ */
+function findByAnchor(anchor, region) {
+  const text = String(anchor || '').trim();
+  if (!text) return null;
+  const tries = [text];
+  for (const n of [12, 8, 5]) {
+    if (text.length > n) tries.push(text.slice(0, n));
+  }
+  for (const q of tries) {
+    const r = ocr.find(q, { region, refresh: true, mode: 'contains' });
+    if (r.picked) return { ...r.picked, matchedBy: q };
+  }
+  return null;
 }
 
 function callTool(name, args = {}) {
@@ -271,9 +291,15 @@ function callTool(name, args = {}) {
           return fail(`这条提问已经是 ${detail.status}，不能再答`);
         }
         const suggestion = db.suggestAnswer(detail);
-        const selections = Array.isArray(args.selections) && args.selections.length
+        const raw = Array.isArray(args.selections) && args.selections.length
           ? args.selections
-          : suggestion.answers;
+          : qn.fromSuggestion(suggestion);
+        const { answers, errors } = qn.normalizeSelections(detail, raw);
+        if (errors.length) {
+          return fail(`答案有问题，未提交：\n- ${errors.join('\n- ')}`);
+        }
+        const payload = qn.buildReplyPayload(detail, answers);
+        const plan = qn.clickPlan(detail, answers);
 
         // 默认只预览：答了等于替用户做决定，不当默认行为。
         if (args.preview !== false) {
@@ -282,13 +308,11 @@ function callTool(name, args = {}) {
             requestId: detail.requestId,
             sessionId: detail.sessionId,
             title: detail.title,
-            wouldSubmit: {
-              schemaVersion: 2,
-              requestId: detail.requestId,
-              answers: selections.map((s) => ({ stepId: s.stepId, selectedOptionIds: s.optionIds, selectedOther: false })),
-            },
+            wouldSubmit: payload,
+            clickPlan: plan,
             steps: detail.steps,
-            note: 'preview 模式没有做任何操作。要真提交：preview:false + force:true，并先用截图确认问卷 UI 的选项位置。',
+            note: 'preview 模式没有做任何操作。要真提交：preview:false + force:true。' +
+              '提交会按 clickPlan 用 OCR 找选项文字并点击，最后找提交按钮，然后核对数据库状态。',
           });
         }
 
@@ -296,23 +320,118 @@ function callTool(name, args = {}) {
           return fail('这是在替用户做决定。确认要提交就显式加 force:true');
         }
         if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        if (!args.at) {
-          return fail('需要 at 坐标（问卷第一个选项的位置）。先截图确定，再传 "x,y"');
+        const win = gui.mainWindow();
+        if (!win) return fail('找不到 MiniMax 窗口');
+        const region = args.region || { x: win.x, y: win.y, width: win.width, height: win.height };
+
+        // 逐个点选。每一步都重新 OCR（界面会因为选择而变化）。
+        const clicked = [];
+        const missed = [];
+        for (const step of plan) {
+          const hit = findByAnchor(step.anchor, region);
+          if (!hit) {
+            missed.push({ stepId: step.stepId, anchor: step.anchor, reason: '屏幕上找不到这段文字' });
+            continue;
+          }
+          const overlay = blockedByOverlay(hit.cx, hit.cy);
+          if (overlay) {
+            missed.push({ stepId: step.stepId, anchor: step.anchor, reason: `被 ${overlay.app} 盖住` });
+            continue;
+          }
+          gui.click(hit.cx, hit.cy);
+          clicked.push({ stepId: step.stepId, optionId: step.optionId, at: [hit.cx, hit.cy], text: hit.text, matchedBy: hit.matchedBy });
+          gui.sleep(600);
+          if (step.thenType) {
+            gui.typeText(step.thenType);
+            gui.sleep(300);
+          }
         }
-        // GUI 提交路径：尚未用真实问卷验证过（没有可测的 pending 提问）。
-        // 这里只实现第一步——点到第一个选项，剩下的交给调用方按截图继续。
-        const [ax, ay] = String(args.at).split(',').map(Number);
-        const overlay = blockedByOverlay(ax, ay);
-        if (overlay) {
-          return fail(`坐标 (${ax},${ay}) 被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}`);
+
+        if (missed.length) {
+          return ok({
+            submitted: false,
+            clicked,
+            missed,
+            warning: '有选项没点到，已停下（不会盲点提交）。截图确认界面状态，补 at/region 后重试，或手动点完。',
+          });
         }
-        gui.click(ax, ay);
+
+        // 找提交按钮：常见文案都试一遍
+        const submitLabels = ['提交', '确定', '确认', '发送', '完成', 'Submit', 'Send'];
+        let submitHit = null;
+        for (const label of submitLabels) {
+          const r = ocr.find(label, { region, refresh: true, mode: 'exact' });
+          if (r.picked) { submitHit = { label, ...r.picked }; break; }
+        }
+        if (!submitHit) {
+          return ok({
+            submitted: false,
+            clicked,
+            warning: '选项都点了，但没找到提交按钮（试过：' + submitLabels.join('/') + '）。' +
+              '用 minimax_find_text 或截图确认按钮文字，再用 minimax_click 点它。',
+          });
+        }
+        const submitOverlay = blockedByOverlay(submitHit.cx, submitHit.cy);
+        if (submitOverlay) {
+          return ok({ submitted: false, clicked, warning: `提交按钮被 ${submitOverlay.app} 盖住了` });
+        }
+        gui.click(submitHit.cx, submitHit.cy);
+        gui.sleep(1200);
+
+        // 真验证：数据库里这条提问的状态必须从 pending 变掉
+        const after = db.questionnaireDetail(detail.requestId);
+        const done = after && after.status !== 'pending';
         return ok({
-          submitted: false,
-          clickedFirstOption: [ax, ay],
-          pendingSelections: selections,
-          warning: '只点了第一个选项。问卷多为多步，后续步骤需要按截图继续点，最后点提交。这条 GUI 路径没有用真实问卷验证过——每步之后都截图核对。',
+          submitted: true,
+          verified: Boolean(done),
+          status: after?.status || 'unknown',
+          clicked,
+          submitAt: [submitHit.cx, submitHit.cy],
+          ...(done ? {} : { warning: '点了提交但数据库里状态还是 pending，可能没提交成功，截图核对' }),
         });
+      }
+
+      case 'minimax_find_text': {
+        const region = args.region || (() => {
+          const w = gui.mainWindow();
+          return w ? { x: w.x, y: w.y, width: w.width, height: w.height } : null;
+        })();
+        const r = ocr.find(args.text, {
+          region,
+          mode: args.mode || 'contains',
+          index: args.index || 0,
+          refresh: args.refresh !== false,
+        });
+        return ok({
+          query: r.query,
+          total: r.total,
+          picked: r.picked,
+          matches: r.matches,
+          scanned: r.scanned,
+          region: r.region,
+          hint: r.total ? '用 minimax_click_text 或 minimax_click 点 picked.cx/cy' : '没找到；换更短的片段，或用 minimax_screenshot 看图',
+        });
+      }
+
+      case 'minimax_click_text': {
+        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+        const win = gui.mainWindow();
+        const region = args.region || (win ? { x: win.x, y: win.y, width: win.width, height: win.height } : null);
+        const r = ocr.find(args.text, {
+          region,
+          mode: args.mode || 'contains',
+          index: args.index || 0,
+          refresh: true,
+        });
+        if (!r.picked) {
+          return fail(`屏幕上找不到「${args.text}」（扫了 ${r.scanned} 段文字）`);
+        }
+        const overlay = blockedByOverlay(r.picked.cx, r.picked.cy);
+        if (overlay) {
+          return fail(`「${r.picked.text}」的位置被 ${overlay.app} 盖住了，先移开它`);
+        }
+        gui.click(r.picked.cx, r.picked.cy);
+        return ok({ clicked: r.picked.text, at: [r.picked.cx, r.picked.cy], confidence: r.picked.conf, total: r.total });
       }
 
       case 'minimax_new_task': {
@@ -342,23 +461,64 @@ function callTool(name, args = {}) {
       case 'minimax_open_session': {
         const sid = db.resolveSession(args.session);
         if (!sid) return fail(`找不到会话: ${args.session}`);
-        if (!args.at) {
-          return ok({
-            opened: false,
-            sessionId: sid,
-            hint: '没给 at 坐标，没有乱点。先 minimax_screenshot 看左侧列表，确定该条目的坐标后用 at:"x,y" 重试。',
-            currentWindow: gui.mainWindow(),
-          });
-        }
         if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        const [x, y] = String(args.at).split(',').map(Number);
-        const overlay = blockedByOverlay(x, y);
-        if (overlay) {
-          return fail(`坐标 (${x},${y}) 被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}`);
+        const win = gui.mainWindow();
+        if (!win) return fail('找不到 MiniMax 窗口');
+
+        // 显式给了坐标就用坐标；否则用会话标题去**左侧栏**里 OCR 找。
+        // 注意：标题在侧栏和主区域顶部都会出现，必须只认左侧那一列，否则会点到顶栏。
+        let target = null;
+        if (args.at) {
+          const [x, y] = String(args.at).split(',').map(Number);
+          target = { cx: x, cy: y, text: '(手动坐标)' };
+        } else {
+          const meta = db.sessionMeta(sid);
+          const candidates = [meta?.title, meta?.firstUserMessage]
+            .map((s) => String(s || '').trim())
+            .filter((s) => s.length >= 2);
+          if (!candidates.length) {
+            return fail('这个会话没有标题可用于定位，请用 at 给出侧栏坐标');
+          }
+          // 标题在侧栏和主区域顶部都会出现，取**最靠左那一列**的命中（侧栏就是最左列）
+          for (const c of candidates) {
+            for (const q of [c.slice(0, 14), c.slice(0, 8)]) {
+              const r = ocr.find(q, {
+                region: { x: win.x, y: win.y, width: win.width, height: win.height },
+                refresh: true,
+                mode: 'contains',
+                limit: 20,
+              });
+              if (!r.matches.length) continue;
+              const picked = ocr.pickLeftmostColumn(r.matches);
+              if (!picked) continue;
+              target = { ...picked, matchedBy: q, alternatives: r.matches.length };
+              break;
+            }
+            if (target) break;
+          }
+          if (!target) {
+            return ok({
+              opened: false,
+              sessionId: sid,
+              tried: candidates,
+              hint: '侧栏里没找到这个标题（可能被滚动到视野外，或标题被截断）。用 minimax_screenshot 看侧栏，或用 at:"x,y" 指定坐标。',
+            });
+          }
         }
-        gui.click(x, y);
+
+        const overlay = blockedByOverlay(target.cx, target.cy);
+        if (overlay) {
+          return fail(`目标位置被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}`);
+        }
+        gui.click(target.cx, target.cy);
         gui.sleep(1200);
-        return ok({ opened: true, sessionId: sid, clicked: [x, y], note: '点完了，截图核对一下是不是这个会话' });
+        return ok({
+          opened: true,
+          sessionId: sid,
+          clicked: [target.cx, target.cy],
+          matchedText: target.text,
+          note: '点完了。要确认切对了，用 minimax_read_session 看这个会话的末尾是否与界面一致。',
+        });
       }
 
       case 'minimax_stop_generation': {

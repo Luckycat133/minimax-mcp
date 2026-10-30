@@ -2,3 +2,5 @@ node_modules/
 *.log
 screenshots/
 .DS_Store
+.cache/
+dist/

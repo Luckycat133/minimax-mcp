@@ -80,11 +80,14 @@ node scripts/call.js minimax_send_message '{"message":"…","send":true}' --dry-
 
 ```
 minimax_new_task {}                              # 按 ⌘N 新建任务页，并对比前后窗口确认开出来了
-minimax_open_session {session: "3", at: "1250,700"}   # 点左侧列表切换会话
+minimax_open_session {session: "3"}               # 按会话标题在侧栏找并点击（推荐）
+minimax_click_text {text: "处理 GitHub 通知"}     # 已经知道侧栏文字时直接点
+minimax_open_session {session: "3", at: "600,500"} # 标题被截断/滚出视野时才手给坐标
 ```
 
-`minimax_open_session` **不给 at 就只返回当前状态，不乱点**——MiniMax 是 Electron，
-左侧列表读不到控件树，中文 OCR 也不可靠，所以必须由你先截图确定条目坐标。
+`minimax_open_session` 默认拿会话标题去侧栏 OCR 定位，**只认最左那一列**——
+同名标题在顶栏也会出现，不这么筛就会点到顶栏（这个坑实测踩过）。
+找不到就不点，返回 `tried` 和提示。
 `minimax_new_task` 开出来的可能是独立窗口，之后发消息要用 `layout:"newtask"` 或显式 `at`。
 
 ## 回答提问
@@ -92,15 +95,23 @@ minimax_open_session {session: "3", at: "1250,700"}   # 点左侧列表切换会
 ```
 minimax_draft_answer {requestId: "ask_xxx"}      # 只读：问题全文 + 全部选项 + 一份建议答案
 minimax_answer_question {requestId: "ask_xxx"}   # 默认只 preview，不提交
+minimax_answer_question {requestId: "ask_xxx", selections: [...], preview: false, force: true}
 ```
 
 `minimax_draft_answer` 会按每步的 `recommended` 标记给一份建议答案和对应的 reply payload，
 同时把问题和选项原文都给你——**最终判断是你的**。建议答案只是起点，实际答案经常和
 recommended 不一样（我拿历史问卷验过，有一步用户选的就不是 recommended 那个）。
 
-`minimax_answer_question` 默认 `preview:true`，只报告会提交什么、会点什么，不动手。
-要真提交必须 `preview:false` + `force:true` + `at` 坐标，而且**这条 GUI 路径没有用真实
-问卷验证过**（没有可测的 pending 提问）——每一步之后都截图核对。
+`minimax_answer_question` 默认 `preview:true`，返回 `wouldSubmit`（真实 reply payload）
+和 `clickPlan`（要按哪些文字去点），不动手。
+
+真提交要 `preview:false + force:true`。它会：按 clickPlan 用 OCR 找每个选项的文字并点击
+（找不到就缩短锚点重试，跨行渲染也不会瞎点）→ 找提交按钮（提交/确定/确认/发送/完成/Submit/Send）
+→ 点它 → **回数据库核对这条提问的状态是否真的从 pending 变成 answered**。
+`verified:false` 就是没提交成功，别信"我点了"。
+
+`selections` 里 `optionIds` 和 `selectedOptionIds` 两种写法都收，单选给多个会被砍成一个并报错，
+未知 stepId / optionId 会点名可选值——不会静默忽略。
 
 ## 收结果
 
@@ -119,8 +130,18 @@ minimax_get_result {afterMessageId: 13278, timeoutSeconds: 300} # 等这轮跑�
 
 ## 点按钮
 
-MiniMax 没有可用的控件树，中文 OCR 也不可靠。所以点按钮的流程是：
-截图 → 人（或你）看坐标 → `minimax_click`。
+MiniMax 没有可用的控件树，但**有 OCR**。所以点按钮的正规做法是按文字点，不要手算坐标：
+
+```
+minimax_find_text {text: "提交"}                  # 只读，先看命中几个、分别在哪
+minimax_click_text {text: "提交", mode: "exact"}  # 找到就点它的中心
+```
+
+`minimax_find_text` 走 macOS Vision，中英文都能认，返回屏幕点坐标（不是像素）。
+匹配会忽略空白和全角半角差异，`contains` 模式下完全相等的排第一。
+点之前会做遮挡检查，被别的 App 盖住就拒绝。
+
+只有 OCR 认不出来（纯图标按钮、文字被截断）时才退回截图 + 手算坐标：
 
 ```
 minimax_screenshot {mode: "region", x: 296, y: 690, width: 800, height: 200}

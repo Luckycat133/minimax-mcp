@@ -24,7 +24,11 @@ const check = (label, fn) => {
   }
 };
 
-check('工具数为 20', () => assert.strictEqual(TOOLS.length, 20));
+// 不写死数字：工具数只保证"在合理区间"，具体一致性由 glama.json 那条断言盯
+check('工具数在合理区间', () => {
+  assert.ok(TOOLS.length >= 14, `工具数太少: ${TOOLS.length}`);
+  assert.ok(TOOLS.length <= 40, `工具数异常膨胀: ${TOOLS.length}`);
+});
 
 check('工具名无重复', () => {
   assert.strictEqual(new Set(TOOL_NAMES).size, TOOL_NAMES.length);

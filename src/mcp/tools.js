@@ -230,13 +230,13 @@ const TOOLS = [
   {
     name: 'minimax_open_session',
     description:
-      '切换到某个会话。MiniMax 是 Electron，左侧列表读不到控件树也做不了可靠的中文 OCR，' +
-      '所以必须由调用方先截图确定条目位置，再用 at 给出坐标。不给 at 时只返回当前状态和所需信息，不乱点。',
+      '切换到某个会话。默认用会话标题在左侧栏里 OCR 定位并点击（只认最左那一列，避免点到顶栏的同名标题）；' +
+      '标题在侧栏被截断或滚出视野时，可以用 at 显式给坐标。找不到就不点，返回 tried 和提示。',
     inputSchema: {
       type: 'object',
       properties: {
         session: { type: 'string', description: '会话 ID 或 minimax_list_sessions 的序号' },
-        at: { type: 'string', description: '左侧列表里该条目的坐标 "x,y"' },
+        at: { type: 'string', description: '可选：侧栏里该条目的坐标 "x,y"，给了就不做 OCR 定位' },
       },
       required: ['session'],
       additionalProperties: false,
@@ -246,6 +246,59 @@ const TOOLS = [
     name: 'minimax_stop_generation',
     description: '让 MiniMax 停止当前这轮生成（按 Esc）。只发按键，不点任何按钮，可逆。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'minimax_find_text',
+    description:
+      '在屏幕上按文字定位元素，返回它的屏幕点坐标（macOS Vision OCR，支持中英文）。' +
+      '这是给 minimax_click 找坐标的正规做法——比让模型看截图估坐标可靠得多。' +
+      '默认只扫 MiniMax 窗口；要扫别处用 region。只读，不点任何东西。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '要找的文字，可只给片段' },
+        mode: { type: 'string', enum: ['contains', 'exact', 'prefix'], default: 'contains' },
+        index: { type: 'integer', minimum: 0, default: 0, description: '命中多个时取第几个（按匹配度排序）' },
+        region: {
+          type: 'object',
+          description: '扫描区域（屏幕点）；省略则扫 MiniMax 主窗口',
+          properties: {
+            x: { type: 'number' }, y: { type: 'number' },
+            width: { type: 'number' }, height: { type: 'number' },
+          },
+          required: ['x', 'y', 'width', 'height'],
+          additionalProperties: false,
+        },
+        refresh: { type: 'boolean', default: true, description: 'true=重新截屏；false=复用 3 秒内的识别结果' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minimax_click_text',
+    description:
+      '找到屏幕上的某段文字并点击它的中心。比手算坐标可靠，适合点按钮、选项、菜单项。' +
+      '会做遮挡检查；默认只点 MiniMax 窗口内的文字。不确定时先用 minimax_find_text 看命中情况。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        mode: { type: 'string', enum: ['contains', 'exact', 'prefix'], default: 'contains' },
+        index: { type: 'integer', minimum: 0, default: 0 },
+        region: {
+          type: 'object',
+          properties: {
+            x: { type: 'number' }, y: { type: 'number' },
+            width: { type: 'number' }, height: { type: 'number' },
+          },
+          required: ['x', 'y', 'width', 'height'],
+          additionalProperties: false,
+        },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
   },
 ];
 
