@@ -8,6 +8,12 @@
 
 const assert = require('node:assert');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+
+// 把数据目录指到临时目录：watch/audit/tasks 会写文件，不隔离就会污染真实状态
+const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'minimax-mcp-test-'));
+process.env.MINIMAX_MCP_HOME = TMP_HOME;
 
 const ROOT = path.join(__dirname, '..');
 const db = require(path.join(ROOT, 'src/gateway/db'));
@@ -240,10 +246,66 @@ check('超出范围的数字被拒绝', () => {
     assert.ok(/不能为空/.test(payload(res).error));
   });
 
+  await checkAsync('卡住的会话会走自动催促，且发的是 send+force', async () => {
+    const watch = require(path.join(ROOT, 'src/gateway/watch'));
+    const sid = db.listSessions(1)[0]?.sessionId;
+    assert.ok(sid, '需要一个真实会话 id');
+
+    const fakeBrief = () => ({
+      headline: '', counts: {}, scannedSessions: 1, quietSessions: 0,
+      taskFailures: [],
+      items: [{ kind: 'stalled', sessionId: sid, title: '测试会话', age: '11 分钟前', why: '末条是用户消息', next: '' }],
+    });
+
+    const policy = {
+      mode: 'act', minIdleSeconds: 0, maxActionsPerTick: 1,
+      autoNudge: { enabled: true, cooldownMinutes: 0, message: '看起来停住了，需要我做什么吗？' },
+      allowSessions: [sid],
+    };
+
+    // 先 dryRun：只出计划，不执行
+    const planned = watch.tick({ policy, dryRun: true, briefFn: fakeBrief });
+    const plan = planned.actions.find((a) => a.tool === 'minimax_send_message');
+    assert.ok(plan, '应该有自动催促的计划');
+    assert.strictEqual(plan.planned, true, 'dryRun 下必须标 planned');
+
+    // 再真跑：注入假执行器，验证调用形状
+    const calls = [];
+    const real = watch.tick({
+      policy,
+      briefFn: fakeBrief,
+      execute: (tool, args) => {
+        calls.push({ tool, args });
+        return { content: [{ type: 'text', text: JSON.stringify({ sent: true, verified: true, sessionId: sid }) }], isError: false };
+      },
+    });
+    assert.strictEqual(calls.length, 1, '应该只执行一个动作');
+    assert.strictEqual(calls[0].tool, 'minimax_send_message');
+    assert.strictEqual(calls[0].args.send, true);
+    assert.strictEqual(calls[0].args.force, true, '自动催促要绕过活跃守卫，但必须先过 idle 判定');
+    assert.ok(real.actions.some((a) => a.ok === true));
+  });
+
+  await checkAsync('非 act 模式绝不自动催促', async () => {
+    const watch = require(path.join(ROOT, 'src/gateway/watch'));
+    const sid = db.listSessions(1)[0]?.sessionId;
+    const calls = [];
+    watch.tick({
+      policy: { mode: 'observe', allowSessions: [sid] },
+      briefFn: () => ({
+        headline: '', counts: {}, scannedSessions: 1, quietSessions: 0, taskFailures: [],
+        items: [{ kind: 'stalled', sessionId: sid, title: 'x', age: '99 分钟前', why: '', next: '' }],
+      }),
+      execute: (tool, args) => { calls.push(tool); return { content: [{ type: 'text', text: '{}' }] }; },
+    });
+    assert.strictEqual(calls.length, 0, 'observe 模式不该执行任何动作');
+  });
+
   const failed = results.filter((r) => !r.pass);
   for (const r of results) {
     console.log(`${r.pass ? '[OK]  ' : '[FAIL]'} ${r.name}${r.detail ? ` — ${r.detail}` : ''}`);
   }
   console.log(`\n${results.length - failed.length}/${results.length} 通过`);
+  try { fs.rmSync(TMP_HOME, { recursive: true, force: true }); } catch { /* 忽略 */ }
   process.exit(failed.length ? 1 : 0);
 })();

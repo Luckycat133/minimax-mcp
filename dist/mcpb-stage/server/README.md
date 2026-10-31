@@ -126,6 +126,10 @@ MiniMax 是 Electron：读不到控件树，AppleScript 被沙箱拦。想按"�
 - macOS（需要「辅助功能」和「屏幕录制」两项权限，给运行 MCP 的那个 App）
 - Node.js 22+
 - `python3`、`sqlite3`（系统自带）
+- 可选环境变量：`MINIMAX_MCP_HOME` 改数据目录（默认 `~/.minimax-mcp`），
+  `MINIMAX_MIN_WINDOW_WIDTH` 改主窗口宽度下限（默认 320）
+- 可选环境变量：`MINIMAX_MCP_HOME` 改数据目录（默认 `~/.minimax-mcp`），
+  `MINIMAX_MIN_WINDOW_WIDTH` 改主窗口宽度下限（默认 320）
 - Swift 工具链（`xcode-select --install`）——只用于编译 OCR 助手，编译一次即可
 - MiniMax Code 已安装并登录
 

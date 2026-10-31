@@ -211,7 +211,10 @@ function decideQuestion(detail, ctx = {}) {
     // 人在机器前：不该抢焦点代答，但这件事仍然需要人处理，所以要报出来而不是吞掉
     return { action: 'ask_human', risk, why: `人就在机器前（闲置 ${idle}s），留给你自己点，不抢焦点` };
   }
-  return { action: 'auto_answer', risk, why: '低风险 + 有推荐答案 + 人不在，可以代答' };
+  const idleNote = ctx.idleSeconds !== undefined
+    ? `人已离开 ${ctx.idleSeconds}s（阈值 ${policy.minIdleSeconds}s）`
+    : `人已离开 ≥${policy.minIdleSeconds}s`;
+  return { action: 'auto_answer', risk, why: `低风险 + 有推荐答案 + ${idleNote}，可以代答` };
 }
 
 /** 决定卡住的会话要不要自动催。 */
@@ -239,7 +242,10 @@ function decideNudge(session, ctx = {}) {
   if (ctx.lastNudgeMinutes !== undefined && ctx.lastNudgeMinutes < nudge.cooldownMinutes) {
     return { action: 'skip', risk, why: `${ctx.lastNudgeMinutes} 分钟前催过，冷却中` };
   }
-  return { action: 'auto_nudge', risk, why: '会话卡住 + 人不在 + 没催过，可以自动催一次' };
+  const idleNote = ctx.idleSeconds !== undefined
+    ? `人已离开 ${ctx.idleSeconds}s`
+    : '人已离开';
+  return { action: 'auto_nudge', risk, why: `会话卡住 + ${idleNote} + 没催过，可以自动催一次` };
 }
 
 module.exports = {

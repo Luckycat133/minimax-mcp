@@ -105,7 +105,10 @@ minimax_open_session {session: "3", at: "600,500"} # 标题被截断/滚出视�
 `minimax_open_session` 默认拿会话标题去侧栏 OCR 定位，**只认最左那一列**——
 同名标题在顶栏也会出现，不这么筛就会点到顶栏（这个坑实测踩过）。
 找不到就不点，返回 `tried` 和提示。
-`minimax_new_task` 开出来的可能是独立窗口，之后发消息要用 `layout:"newtask"` 或显式 `at`。
+`minimax_new_task` 有两种结果：`via:"new-window"`（真开了新窗口）或
+`via:"view-switch"`（同一窗口换了视图，靠主区域文字量塌缩判断）。
+两种都算成功。开完发消息要用 `layout:"newtask"` 或显式 `at`。
+`via:"unknown"` 才是没成功——通常是焦点不在 MiniMax 的输入区。
 
 ## 回答提问
 
@@ -129,7 +132,9 @@ recommended 不一样（我拿历史问卷验过，有一步用户选的就不�
 3. 状态还没变才去找提交按钮（提交/确定/确认/发送/完成/Submit/Send），点了再核对一次。
 
 `verified:true` 表示数据库里这条提问已经离开 pending。`verified:false` 就是没提交成功，
-别信"我点了"。两种失败都只回报、不盲试：`missed[]` 是有选项没点到，`warning` 是点了但状态没变。
+别信"我点了"。这条链路 2026-10-31 已在真机上跑通：点选项 → 状态变 answered →
+MiniMax 收到并回复"你的回答是…"。这条链路 2026-10-31 已在真机上跑通：点选项 → 状态变 answered →
+MiniMax 收到并回复"你的回答是…"。两种失败都只回报、不盲试：`missed[]` 是有选项没点到，`warning` 是点了但状态没变。
 
 `selections` 里 `optionIds` 和 `selectedOptionIds` 两种写法都收，单选给多个会被砍成一个并报错，
 未知 stepId / optionId 会点名可选值——不会静默忽略。

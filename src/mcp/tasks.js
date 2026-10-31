@@ -16,7 +16,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const STORE_PATH = path.join(os.homedir(), '.minimax-mcp', 'tasks.json');
+const STORE_PATH = path.join(
+  process.env.MINIMAX_MCP_HOME || path.join(os.homedir(), '.minimax-mcp'),
+  'tasks.json'
+);
 
 /** working → completed | failed | canceled */
 function load() {

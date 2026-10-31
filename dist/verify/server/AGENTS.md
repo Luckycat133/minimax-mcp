@@ -258,3 +258,61 @@ MiniMax 没有对外事件接口，能读的只有 SQLite。所以只能在服�
 - `search` 同时搜会话标题（按标题找会话是最高频用法）
 - `minimax_watch` 加 `action: "config"` 持久化策略（定时任务没法带参数）
 - `minimax_activate` 在 App 没启动时会尝试拉起，而不是直接报错
+
+## 2026-10-31 09:40-10:00 真机跑通两条核心链路（此前从未验证）
+
+用户追问"为什么不行"，逼出了这次实测。结论：**能跑，而且发现第 9 个 bug。**
+
+### 已验证
+1. **`answer_question` 真提交**（第一次完整走完）：
+   造了一个低风险提问（`ask_a4e35fd0…`，「要不要继续？」，continue 标推荐）→
+   OCR 定位选项 → 点击 (1529,1170) → 数据库状态 `pending → answered` →
+   MiniMax 收到并回复"你的回答 | **继续**"。耗时 1775ms。
+2. **自动代答**：新提问 `ask_afd17e57…` 出现后，`minimax_watch` 自己判定
+   "低风险 + 有推荐 + 人离开够久" → 自动点选项 → `verified: true` →
+   MiniMax 回"第二次问卷已发出，你的回答已收到"。审计里有 `answer_question` 记录。
+3. **审计覆盖自动动作**：watch 内部走 `callTool`，所以代答同样落审计，不是法外之地。
+
+### 第 9 个 bug：`minimax_new_task` 永远报 `opened:false`
+⌘N 多数情况是**同一窗口内换视图**，不是开新窗口。原实现只比窗口列表，所以永远检测不到。
+现在加了第二条判据：对比切换前后主区域 OCR 文字量，掉到一半以下就算切换成功
+（实测 1002 → 241）。返回里带 `via: "new-window" | "view-switch" | "unknown"`。
+
+### 自动催促：真机没能复现，改用测试接缝验证
+MiniMax 太能干——我发完消息 400ms 内按 Esc，它照样把回复补完了，"卡住"状态活不过一分钟。
+所以给 `watch.tick` 加了 `briefFn` 注入点：测试传一份合成的 brief（含 stalled 项），
+就能验证"卡住 → decideNudge → execute(send_message, {send:true, force:true})"这条接线。
+**真机端到端的自动催促仍未跑到**，这是环境条件限制，不是代码没写。
+
+### 测试隔离
+`watch` / `audit` / `tasks` 三个模块的数据目录现在支持 `MINIMAX_MCP_HOME` 环境变量。
+`edge.test.js` 会把它指到临时目录——否则跑一次测试就会往真实 `events.jsonl` 里写假事件。
+
+## 2026-10-31 09:40-10:00 真机跑通两条核心链路（此前从未验证）
+
+用户追问"为什么不行"，逼出了这次实测。结论：**能跑，而且发现第 9 个 bug。**
+
+### 已验证
+1. **`answer_question` 真提交**（第一次完整走完）：
+   造了一个低风险提问（`ask_a4e35fd0…`，「要不要继续？」，continue 标推荐）→
+   OCR 定位选项 → 点击 (1529,1170) → 数据库状态 `pending → answered` →
+   MiniMax 收到并回复"你的回答 | **继续**"。耗时 1775ms。
+2. **自动代答**：新提问 `ask_afd17e57…` 出现后，`minimax_watch` 自己判定
+   "低风险 + 有推荐 + 人离开够久" → 自动点选项 → `verified: true` →
+   MiniMax 回"第二次问卷已发出，你的回答已收到"。审计里有 `answer_question` 记录。
+3. **审计覆盖自动动作**：watch 内部走 `callTool`，所以代答同样落审计，不是法外之地。
+
+### 第 9 个 bug：`minimax_new_task` 永远报 `opened:false`
+⌘N 多数情况是**同一窗口内换视图**，不是开新窗口。原实现只比窗口列表，所以永远检测不到。
+现在加了第二条判据：对比切换前后主区域 OCR 文字量，掉到一半以下就算切换成功
+（实测 1002 → 241）。返回里带 `via: "new-window" | "view-switch" | "unknown"`。
+
+### 自动催促：真机没能复现，改用测试接缝验证
+MiniMax 太能干——我发完消息 400ms 内按 Esc，它照样把回复补完了，"卡住"状态活不过一分钟。
+所以给 `watch.tick` 加了 `briefFn` 注入点：测试传一份合成的 brief（含 stalled 项），
+就能验证"卡住 → decideNudge → execute(send_message, {send:true, force:true})"这条接线。
+**真机端到端的自动催促仍未跑到**，这是环境条件限制，不是代码没写。
+
+### 测试隔离
+`watch` / `audit` / `tasks` 三个模块的数据目录现在支持 `MINIMAX_MCP_HOME` 环境变量。
+`edge.test.js` 会把它指到临时目录——否则跑一次测试就会往真实 `events.jsonl` 里写假事件。

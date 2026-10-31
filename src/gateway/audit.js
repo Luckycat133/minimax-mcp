@@ -15,7 +15,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const DIR = path.join(os.homedir(), '.minimax-mcp');
+const DIR = process.env.MINIMAX_MCP_HOME || path.join(os.homedir(), '.minimax-mcp');
 const FILE = path.join(DIR, 'audit.jsonl');
 const MAX_BYTES = 2 * 1024 * 1024; // 超过 2MB 就滚一份，别无限长
 

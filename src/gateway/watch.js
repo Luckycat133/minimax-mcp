@@ -22,7 +22,8 @@ const db = require('./db');
 const brief = require('./brief');
 const policyMod = require('./policy');
 
-const DIR = path.join(os.homedir(), '.minimax-mcp');
+// 允许用环境变量改数据目录：测试要隔离状态，否则会污染真实的 events/state。
+const DIR = process.env.MINIMAX_MCP_HOME || path.join(os.homedir(), '.minimax-mcp');
 const STATE_FILE = path.join(DIR, 'watch-state.json');
 const EVENT_FILE = path.join(DIR, 'events.jsonl');
 const REPORT_FILE = path.join(DIR, 'report.md');
@@ -210,6 +211,17 @@ function appendEvents(list) {
 
 /** 读事件队列，since 可以是时间戳（ms）或 ISO 时间。 */
 function readEvents(since, limit = 50) {
+  // 先校验参数再读文件：文件不存在时也要能报出"你给的 since 是错的"，
+  // 否则一个拼错的时间会被当成"没有事件"静默吞掉。
+  let cutoff = null;
+  if (since !== undefined && since !== null && since !== '') {
+    const t = typeof since === 'number' ? since : Date.parse(String(since));
+    if (Number.isNaN(t)) {
+      throw new Error(`since 不是合法时间：${JSON.stringify(since)}；用 ISO 时间或毫秒时间戳`);
+    }
+    cutoff = t;
+  }
+
   let rows = [];
   try {
     const text = fs.readFileSync(EVENT_FILE, 'utf8');
@@ -217,16 +229,10 @@ function readEvents(since, limit = 50) {
       try { return JSON.parse(l); } catch { return null; }
     }).filter(Boolean);
   } catch {
-    return { events: [], count: 0 };
+    return { events: [], count: 0, total: 0 };
   }
-  let filtered = rows;
-  if (since !== undefined && since !== null && since !== '') {
-    const t = typeof since === 'number' ? since : Date.parse(String(since));
-    if (Number.isNaN(t)) {
-      throw new Error(`since 不是合法时间：${JSON.stringify(since)}；用 ISO 时间或毫秒时间戳`);
-    }
-    filtered = rows.filter((e) => Date.parse(e.at) >= t);
-  }
+
+  const filtered = cutoff === null ? rows : rows.filter((e) => Date.parse(e.at) >= cutoff);
   return { events: filtered.slice(-limit), count: filtered.length, total: rows.length };
 }
 
@@ -275,7 +281,10 @@ function tick(opts = {}) {
     return true;
   };
 
-  const b = brief.brief({
+  // briefFn 是测试接缝：真实调用走 brief.brief；测试里可以注入一份合成快照，
+  // 这样"卡住 → 自动催促"这条分支不必依赖真的有个会话卡住（很难稳定复现）。
+  const briefFn = opts.briefFn || brief.brief;
+  const b = briefFn({
     stalledMinutes: opts.stalledMinutes,
     finishedMinutes: opts.finishedMinutes,
     limit: 300,

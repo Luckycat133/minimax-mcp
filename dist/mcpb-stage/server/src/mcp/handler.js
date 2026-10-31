@@ -540,24 +540,59 @@ function dispatch(name, args = {}) {
 
       case 'minimax_new_task': {
         if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+        const win = gui.mainWindow();
+        if (!win) return fail('找不到 MiniMax 窗口');
+        const region = { x: win.x, y: win.y, width: win.width, height: win.height };
+
         const before = gui.appWindows().map((w) => `${w.pid}:${w.x},${w.y},${w.width}x${w.height}`).sort();
+        // 记下切换前主区域的文字量。⌘N 多数情况是"同一窗口内换视图"，
+        // 会话页有一大坨消息，新建页只剩问候语 + 占位符，文字量会塌下来。
+        const beforeText = (() => {
+          try { return ocr.read(region).items.map((i) => i.text).join('').length; } catch { return null; }
+        })();
+
         gui.pressKey('n', ['cmd']);
         gui.sleep(2500);
+
         const after = gui.appWindows().map((w) => `${w.pid}:${w.x},${w.y},${w.width}x${w.height}`).sort();
-        const opened = after.filter((w) => !before.includes(w));
-        if (opened.length) {
-          const m = opened[0].match(/^(\d+):(-?[\d.]+),(-?[\d.]+),(\d+)x(\d+)$/);
+        const newWindows = after.filter((w) => !before.includes(w));
+        const afterText = (() => {
+          try { return ocr.read(region).items.map((i) => i.text).join('').length; } catch { return null; }
+        })();
+
+        if (newWindows.length) {
+          const m = newWindows[0].match(/^(\d+):(-?[\d.]+),(-?[\d.]+),(\d+)x(\d+)$/);
           const geo = m ? { x: Number(m[2]), y: Number(m[3]), width: Number(m[4]), height: Number(m[5]) } : null;
           return ok({
             opened: true,
-            newWindow: opened,
+            via: 'new-window',
+            newWindow: newWindows,
             window: geo,
             hint: geo ? `新任务页输入框大约在 (${Math.round(geo.x + geo.width * 0.416)}, ${Math.round(geo.y + geo.height * 0.418)})，或直接用 layout:"newtask"` : null,
           });
         }
+
+        // 视图切换的判据：主区域文字量掉到原来的一半以下
+        const shrank = beforeText !== null && afterText !== null && beforeText > 40 && afterText < beforeText * 0.5;
+        if (shrank) {
+          const coords = gui.inputCoords(win, null, 'newtask');
+          return ok({
+            opened: true,
+            via: 'view-switch',
+            textBefore: beforeText,
+            textAfter: afterText,
+            window: { x: win.x, y: win.y, width: win.width, height: win.height },
+            hint: `已在同一窗口切到新建任务页（文字量 ${beforeText} → ${afterText}）。` +
+              `输入框估算 (${coords.x},${coords.y})，不准就用 minimax_find_text 找占位符再点。`,
+          });
+        }
+
         return ok({
           opened: false,
-          note: '按了 ⌘N 但没检测到新窗口。可能快捷键没注册、或新任务页是在当前窗口内切换的视图——截图确认一下。',
+          via: 'unknown',
+          textBefore: beforeText,
+          textAfter: afterText,
+          note: '按了 ⌘N 但既没新窗口、主区域文字量也没明显变化。可能焦点不在 MiniMax 输入区，或快捷键被占用——截图确认。',
           windows: after,
         });
       }
