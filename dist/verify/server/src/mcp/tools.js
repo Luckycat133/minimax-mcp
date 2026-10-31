@@ -265,6 +265,60 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
+    name: 'minimax_watch',
+    description:
+      '跑一轮主动巡检：比对上次快照，产出「新事件」，并按策略自动处理低风险的事。' +
+      '动作类型：跑完/报错/恢复/新提问/卡住/后台任务失败。' +
+      '自动执行的门槛是「风险低 + 有推荐答案 + 人已离开 ≥minIdleSeconds + 每轮限额」，' +
+      '任何涉及钱、发布、删除、凭证、对外承诺的问题一律不自动，只进 needsHuman。' +
+      'dryRun=true 只算不做。首次调用只建基线，不产生事件。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['tick', 'status', 'reset'], default: 'tick' },
+        dryRun: { type: 'boolean', default: false, description: 'true=只报告会做什么，不执行任何动作' },
+        policy: {
+          type: 'object',
+          description: '策略覆盖，只写要改的字段',
+          properties: {
+            mode: { type: 'string', enum: ['off', 'observe', 'act'], default: 'act' },
+            riskCeiling: { type: 'string', enum: ['low', 'medium'], default: 'low' },
+            minIdleSeconds: { type: 'integer', minimum: 0, default: 180, description: '人离开多久才允许自动动界面' },
+            maxActionsPerTick: { type: 'integer', minimum: 0, maximum: 10, default: 2 },
+            autoNudge: {
+              type: 'object',
+              properties: {
+                enabled: { type: 'boolean', default: true },
+                message: { type: 'string' },
+                cooldownMinutes: { type: 'integer', minimum: 0, default: 360 },
+              },
+              additionalProperties: false,
+            },
+            allowSessions: { type: 'array', items: { type: 'string' }, description: '只对这些会话生效；不给=全部' },
+          },
+          additionalProperties: false,
+        },
+        stalledMinutes: { type: 'integer', minimum: 1, default: 10 },
+        finishedMinutes: { type: 'integer', minimum: 1, default: 60 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minimax_events',
+    description:
+      '读巡检事件队列（minimax_watch 每轮写入的）。用于拉取「我不在的时候发生了什么」。' +
+      '纯读文件，无副作用。事件类型：finished / error / recovered / question / stalled / task_failed / auto_action。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        since: { type: 'string', description: 'ISO 时间或毫秒时间戳；不给则返回最近的' },
+        limit: { type: 'integer', minimum: 1, maximum: 500, default: 50 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'minimax_find_text',
     description:
       '在屏幕上按文字定位元素，返回它的屏幕点坐标（macOS Vision OCR，支持中英文）。' +

@@ -18,13 +18,15 @@ Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.m
 
 ## 工具面
 
-契约版本 1，23 个工具，每个单一意图。
+契约版本 1，25 个工具，每个单一意图。
 
 只读（不改任何东西）：
 
 | 工具 | 作用 |
 |---|---|
 | `minimax_brief` | **态势快照**：只输出需要处理的事，按优先级排序，每条带原因和下一步 |
+| `minimax_events` | 读巡检事件队列（我不在的时候发生了什么） |
+| `minimax_events` | 读巡检事件队列（我不在的时候发生了什么） |
 | `minimax_status` | 数据库位置、会话数、消息数、最后活动、运行中任务数 |
 | `minimax_list_sessions` | 按最近活动列出会话 |
 | `minimax_read_session` | 读某个会话的消息（可带思考过程） |
@@ -48,7 +50,63 @@ Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.m
 | `minimax_answer_question` | 提交问卷答案（默认只 preview，提交后核对数据库状态） |
 | `minimax_new_task` / `minimax_open_session` | 新建任务页 / 按标题切换会话 |
 | `minimax_click_text` | 找到某段文字并点它（比手算坐标可靠） |
+| `minimax_watch` | **主动巡检**：比对快照产出事件，按风险策略自动处理低风险的事 |
+| `minimax_watch` | **主动巡检**：比对快照产出事件，按风险策略自动处理低风险的事 |
 | `minimax_click` / `minimax_type` / `minimax_key` | 基础键鼠原语 |
+
+## 主动巡检（这是和"工具箱"最大的区别）
+
+`minimax_brief` 是"你问我答"，`minimax_watch` 是"我自己看"：它记住上次快照，
+只报变化，并且能把**低风险**的事直接处理掉。
+
+```
+minimax_watch                 # 跑一轮
+minimax_watch {dryRun: true}  # 只算不做
+minimax_events                # 拉事件
+```
+
+自动动作有四道闸：**风险等级 ≤ low**、**有推荐答案**、**人离开 ≥180 秒**、**每轮 ≤2 个动作**。
+涉及钱 / 发布 / 删除 / 凭证 / 对外承诺的，一律只进 `needsHuman`，永不自动。
+
+风险判据在 `src/gateway/policy.js`，纯函数，28 条单测盯着。有个关键取舍：
+**「没有推荐答案」会把等级从 low 抬到 medium**——出题方没给默认项，
+说明它认为需要人判断，那就不该替人挑。
+
+装成定时任务：
+
+```bash
+node scripts/install-watch-agent.js     # 每 5 分钟一轮（launchd）
+node scripts/watch-tick.js              # 手动跑一轮
+```
+
+产物：`~/.minimax-mcp/{events.jsonl, report.md, watch-state.json, watch.log}`。
+
+## 主动巡检（这是和"工具箱"最大的区别）
+
+`minimax_brief` 是"你问我答"，`minimax_watch` 是"我自己看"：它记住上次快照，
+只报变化，并且能把**低风险**的事直接处理掉。
+
+```
+minimax_watch                 # 跑一轮
+minimax_watch {dryRun: true}  # 只算不做
+minimax_events                # 拉事件
+```
+
+自动动作有四道闸：**风险等级 ≤ low**、**有推荐答案**、**人离开 ≥180 秒**、**每轮 ≤2 个动作**。
+涉及钱 / 发布 / 删除 / 凭证 / 对外承诺的，一律只进 `needsHuman`，永不自动。
+
+风险判据在 `src/gateway/policy.js`，纯函数，28 条单测盯着。有个关键取舍：
+**「没有推荐答案」会把等级从 low 抬到 medium**——出题方没给默认项，
+说明它认为需要人判断，那就不该替人挑。
+
+装成定时任务：
+
+```bash
+node scripts/install-watch-agent.js     # 每 5 分钟一轮（launchd）
+node scripts/watch-tick.js              # 手动跑一轮
+```
+
+产物：`~/.minimax-mcp/{events.jsonl, report.md, watch-state.json, watch.log}`。
 
 ## 三档风险分级
 

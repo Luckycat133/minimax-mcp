@@ -194,14 +194,9 @@ check('commit 级工具默认都不动作', () => {
       }
     }
 
-    // 软规则：每个 commit 工具至少要有一道默认关闭的闸门。
-    //   - preview 默认 true，或者
-    //   - send / force 默认 false（有其一即可，send_message 用的是 send 那道闸）
-    const gates = [];
-    if (props.preview && props.preview.default === true) gates.push('preview:true');
-    if (props.send && props.send.default === false) gates.push('send:false');
-    if (props.force && props.force.default === false) gates.push('force:false');
-    assert.ok(gates.length > 0, `${t.name} 是 commit 级但没有任何默认关闭的闸门`);
+    // 每个 commit 工具都必须写明"凭什么默认不会误动作"（GATES 表里那一条）
+    const gate = ann.gateOf(t.name);
+    assert.ok(gate && gate.length >= 8, `${t.name} 是 commit 级但没写闸门说明`);
   }
 });
 

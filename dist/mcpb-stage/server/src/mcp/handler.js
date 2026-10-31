@@ -12,6 +12,7 @@ const qn = require('./questionnaire');
 const brief = require('../gateway/brief');
 const audit = require('../gateway/audit');
 const ann = require('./annotations');
+const watch = require('../gateway/watch');
 const tasks = require('./tasks');
 
 /** 客户端是否协商了 Tasks 扩展。由 stdio-server 在 initialize 时设置。 */
@@ -22,6 +23,7 @@ const READONLY = new Set([
   'minimax_brief', 'minimax_status', 'minimax_list_sessions', 'minimax_read_session',
   'minimax_tail_sessions', 'minimax_search', 'minimax_pending', 'minimax_draft_answer',
   'minimax_tasks', 'minimax_windows', 'minimax_find_text', 'minimax_get_result',
+  'minimax_events',
 ]);
 
 function ok(payload) {
@@ -81,6 +83,26 @@ function findByAnchor(anchor, region) {
 function dispatch(name, args = {}) {
   try {
     switch (name) {
+      case 'minimax_watch': {
+        const action = args.action || 'tick';
+        if (action === 'status') return ok(watch.status());
+        if (action === 'reset') return ok(watch.reset());
+        const r = watch.tick({
+          policy: args.policy,
+          dryRun: args.dryRun === true,
+          stalledMinutes: args.stalledMinutes,
+          finishedMinutes: args.finishedMinutes,
+          // 自动动作也走 callTool，这样审计和注解都一致
+          execute: (tool, toolArgs) => callTool(tool, toolArgs),
+        });
+        return ok(r);
+      }
+
+      case 'minimax_events': {
+        const r = watch.readEvents(args.since, args.limit ?? 50);
+        return ok(r);
+      }
+
       case 'minimax_brief':
         return ok(brief.brief({
           stalledMinutes: args.stalledMinutes,

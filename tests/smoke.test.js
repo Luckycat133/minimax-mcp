@@ -235,6 +235,47 @@ function main() {
     const afterRead = audit.recent(1000).length;
     record('只读不写审计', afterRead === beforeRead, `${beforeRead} → ${afterRead}`);
 
+    // watch：status 与 dryRun tick 都必须是只读的、结构完整的
+    const ws = await send('tools/call', { name: 'minimax_watch', arguments: { action: 'status' } });
+    let wsOk = ws.result?.isError !== true;
+    let wsDetail = '';
+    if (wsOk) {
+      const parsed = JSON.parse(ws.result.content[0].text);
+      wsOk = typeof parsed.trackedSessions === 'number' && typeof parsed.statePath === 'string';
+      wsDetail = `跟踪 ${parsed.trackedSessions} 个会话`;
+    } else {
+      wsDetail = ws.result?.content?.[0]?.text?.slice(0, 100) || 'error';
+    }
+    record('watch status 可读', wsOk, wsDetail);
+
+    const wt = await send('tools/call', { name: 'minimax_watch', arguments: { dryRun: true } });
+    let wtOk = wt.result?.isError !== true;
+    let wtDetail = '';
+    if (wtOk) {
+      const parsed = JSON.parse(wt.result.content[0].text);
+      wtOk = Array.isArray(parsed.events)
+        && Array.isArray(parsed.actions)
+        && Array.isArray(parsed.needsHuman)
+        && parsed.dryRun === true
+        && parsed.actions.every((a) => a.planned === true);
+      wtDetail = `事件 ${parsed.events.length} / 动作 ${parsed.actions.length} / 待处理 ${parsed.needsHuman.length}`;
+    } else {
+      wtDetail = wt.result?.content?.[0]?.text?.slice(0, 100) || 'error';
+    }
+    record('watch dryRun 不执行任何动作', wtOk, wtDetail);
+
+    const ev = await send('tools/call', { name: 'minimax_events', arguments: { limit: 5 } });
+    let evOk = ev.result?.isError !== true;
+    let evDetail = '';
+    if (evOk) {
+      const parsed = JSON.parse(ev.result.content[0].text);
+      evOk = Array.isArray(parsed.events);
+      evDetail = `${parsed.events.length} 条事件`;
+    } else {
+      evDetail = ev.result?.content?.[0]?.text?.slice(0, 100) || 'error';
+    }
+    record('events 可读', evOk, evDetail);
+
     const failed = results.filter((r) => !r.pass).length;
     console.log(`\n${results.length - failed}/${results.length} 通过`);
     child.kill();

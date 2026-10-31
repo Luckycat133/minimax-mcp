@@ -204,6 +204,63 @@ minimax_click {x: 678, y: 597}
 为什么需要：GUI 操作没有 undo。事后想弄清"刚才点了哪里、当时是什么状态"，只能靠记录。
 排障时直接 `tail ~/.minimax-mcp/audit.jsonl`。
 
+## 主动巡检
+
+`minimax_brief` 是"你问我答"，`minimax_watch` 是"我自己看"。差别在于它会**记住上次的样子**，
+只报变化，并且能按策略把低风险的事直接处理掉。
+
+```
+minimax_watch                                  # 跑一轮：产出新事件 + 按策略自动处理
+minimax_watch {dryRun: true}                   # 只算不做，先看它会干什么
+minimax_watch {action: "status"}               # 只看巡检器状态，不跑
+minimax_watch {action: "reset"}                # 清基线，下次重新建立（不产生事件）
+minimax_events {since: "2026-10-31T00:00:00"}  # 拉取这段时间的事件
+```
+
+事件类型：`finished` / `error` / `recovered` / `question` / `stalled` / `task_failed` / `auto_action`。
+首次调用只建基线，不产生事件——这是故意的，否则第一次跑就刷一屏"历史变化"。
+
+### 自动动作的门槛
+
+默认策略是**能自动，但只动最安全的那一档**：
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `mode` | `act` | off / observe / act |
+| `riskCeiling` | `low` | 只自动处理低风险 |
+| `minIdleSeconds` | `180` | 人离开够久才动手，不抢焦点 |
+| `maxActionsPerTick` | `2` | 每轮最多两个动作 |
+| `autoNudge` | 开，冷却 360 分钟 | 卡住的会话自动催一次 |
+
+风险怎么判（`src/gateway/policy.js`）：
+
+- **high**：涉及钱、发布上线、删除、凭证权限、对外承诺 → 永不自动，只进 `needsHuman`
+- **medium**：结构性改动、代码流转、引入外部依赖、**没有推荐答案**、多步问卷 → 要人看
+- **low**：征询确认类（要不要继续/重试/哪个）+ 有推荐答案 → 才可能自动
+
+**「没有推荐答案」会把等级抬到 medium**，这条是刻意的：出题方没给默认项，
+说明它认为需要人判断，那就不该替人挑。
+
+### 人不在才动手
+
+自动动作只在你离开 ≥ `minIdleSeconds` 时执行。人在机器前时不会抢焦点代答，
+但这件事仍然会进 `needsHuman`——**不执行不等于吞掉**。
+
+### 装成定时任务
+
+```bash
+node scripts/install-watch-agent.js              # 每 5 分钟一轮
+node scripts/install-watch-agent.js --dry-run    # 只看 plist
+node scripts/install-watch-agent.js --uninstall
+```
+
+装完产物：`~/.minimax-mcp/{watch.log, events.jsonl, report.md, watch-state.json}`。
+`report.md` 是给人看的中文报告，`events.jsonl` 是给程序读的。
+
+> 注意：在沙箱环境里 `launchctl bootstrap` 会返回 `Input/output error`（用户域不可写）。
+> 这时脚本会明确报错并**保持旧任务原样**，不会出现"新的没装上、旧的被停掉"。
+> 请在「终端」App 里跑这条命令。
+
 ## 硬规则
 
 1. **不要替用户点系统级确认**：安装器的「同意」、触控 ID、权限弹窗、GitHub 授权页的

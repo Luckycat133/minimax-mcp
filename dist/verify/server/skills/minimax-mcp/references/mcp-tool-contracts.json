@@ -237,6 +237,29 @@
       },
       "output": "clicked, at[x,y], confidence, total",
       "sideEffects": "鼠标点击一次；有遮挡检查"
+    },
+    {
+      "name": "minimax_watch",
+      "intent": "跑一轮主动巡检：比对快照产出事件，并按策略自动处理低风险的事",
+      "input": {
+        "action": "tick|status|reset, 默认 tick",
+        "dryRun": "boolean, 默认 false",
+        "policy": "{mode, riskCeiling, minIdleSeconds, maxActionsPerTick, autoNudge, allowSessions}",
+        "stalledMinutes": "integer, 默认 10",
+        "finishedMinutes": "integer, 默认 60"
+      },
+      "output": "at, idleSeconds, policy, counts, events[], actions[], needsHuman[], statePath/eventPath/reportPath",
+      "sideEffects": "可能点选项、发催促（受风险策略 + 人离开时长 + 每轮限额约束）；dryRun=true 时无副作用"
+    },
+    {
+      "name": "minimax_events",
+      "intent": "读巡检事件队列",
+      "input": {
+        "since": "ISO 时间或毫秒时间戳，可选",
+        "limit": "integer, 默认 50"
+      },
+      "output": "events[], count, total",
+      "sideEffects": "none（纯读文件）"
     }
   ]
 }

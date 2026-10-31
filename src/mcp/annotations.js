@@ -28,6 +28,7 @@ const LEVEL = {
   minimax_windows: 'read',
   minimax_find_text: 'read',
   minimax_get_result: 'read',   // 轮询等待，不改任何状态
+  minimax_events: 'read',
 
   // 只动界面：改变窗口焦点、光标位置、临时输入，都能靠再点一下恢复
   minimax_activate: 'ui',
@@ -48,6 +49,19 @@ const LEVEL = {
   // 会改变对话内容：发出去、提交上去，都不是点一下能恢复的
   minimax_send_message: 'commit',
   minimax_answer_question: 'commit',
+
+  // watch 会代答/代催，所以按 commit 处理。它能不能动，由策略决定（见 GATES）
+  minimax_watch: 'commit',
+};
+
+/**
+ * commit 级工具的"闸门"说明。契约测试要求每个 commit 工具都有一条，
+ * 逼着作者写清楚"凭什么默认不会误动作"。
+ */
+const GATES = {
+  minimax_send_message: 'send 默认 false；另有活跃守卫，最近 300s 内有会话活动就拒绝',
+  minimax_answer_question: 'preview 默认 true；真提交要 preview:false + force:true',
+  minimax_watch: 'mode 默认 act 但只动低风险：仅当风险=low 且有推荐答案、人离开 ≥minIdleSeconds、每轮最多 maxActionsPerTick 个动作',
 };
 
 /** 幂等：重复调用结果一样，宿主可以安全重试。 */
@@ -81,10 +95,15 @@ function annotate(tools) {
   }));
 }
 
+/** 取某个 commit 工具的闸门说明；不是 commit 级返回 null。 */
+function gateOf(name) {
+  return levelOf(name) === 'commit' ? (GATES[name] || null) : null;
+}
+
 /** 需要写审计日志的级别。 */
 function needsAudit(name) {
   const level = levelOf(name);
   return level === 'ui' || level === 'commit';
 }
 
-module.exports = { LEVEL, levelOf, annotationsFor, annotate, needsAudit };
+module.exports = { LEVEL, GATES, levelOf, gateOf, annotationsFor, annotate, needsAudit };
