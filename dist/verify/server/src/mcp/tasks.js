@@ -88,7 +88,9 @@ function prune(retainHours = 72) {
   const cutoff = Date.now() - retainHours * 3600 * 1000;
   let removed = 0;
   for (const [id, t] of Object.entries(tasks)) {
-    if (t.status !== 'working' && t.updatedAt < cutoff) {
+    // 用 <= ：retainHours=0 的含义是"连刚结束的也清掉"，严格小于会把同一毫秒内
+    // 结束的任务漏下（测试里就撞到过）
+    if (t.status !== 'working' && t.updatedAt <= cutoff) {
       delete tasks[id];
       removed += 1;
     }

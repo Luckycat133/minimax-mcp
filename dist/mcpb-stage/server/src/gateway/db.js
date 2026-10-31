@@ -37,16 +37,48 @@ function literal(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+/**
+ * 把 ? 占位符换成转义后的字面量。
+ *
+ * 为什么不能直接 sql.replace(/\?/g, ...)：字符串字面量里也可能有问号
+ * （比如 like '%?%'），那样会把参数错位到字面量内部，SQL 直接跑歪。
+ * 所以扫一遍，只在单引号外面替换。
+ */
+function inlineParams(sql, params) {
+  let out = '';
+  let i = 0;
+  let inQuote = false;
+  for (let pos = 0; pos < sql.length; pos += 1) {
+    const ch = sql[pos];
+    if (ch === "'") {
+      // SQL 里 '' 是转义的引号，要成对跳过
+      if (inQuote && sql[pos + 1] === "'") {
+        out += "''";
+        pos += 1;
+        continue;
+      }
+      inQuote = !inQuote;
+      out += ch;
+      continue;
+    }
+    if (ch === '?' && !inQuote) {
+      if (i >= params.length) throw new Error('SQL 占位符数量与参数不一致');
+      out += literal(params[i]);
+      i += 1;
+      continue;
+    }
+    out += ch;
+  }
+  if (i !== params.length) throw new Error(`SQL 占位符 ${i} 个但给了 ${params.length} 个参数`);
+  return out;
+}
+
 /** 执行一条查询，返回解析后的数组。失败时抛错，由上层转成工具错误。 */
 function query(sql, params = []) {
   if (!dbExists()) {
     throw new Error(`找不到 MiniMax 数据库: ${DB_PATH}`);
   }
-  let i = 0;
-  const inlined = sql.replace(/\?/g, () => {
-    if (i >= params.length) throw new Error('SQL 占位符数量与参数不一致');
-    return literal(params[i++]);
-  });
+  const inlined = inlineParams(sql, params);
   const out = execFileSync(SQLITE_BIN, ['-json', DB_PATH, inlined], {
     encoding: 'utf8',
     timeout: 15000,
@@ -93,7 +125,9 @@ function status() {
     'max(created_at_ms) as lastActivityMs from local_runtime_message_rows'
   );
   const running = one(
-    "select count(*) as n from local_runtime_background_tasks where status='running'"
+    // 用 ended_at_ms 判"没结束"，不依赖 status 字符串——实测表里只有终态值，
+    // 万一以后加了别的中间态，按字符串匹配会悄悄变成 0。
+    'select count(*) as n from local_runtime_background_tasks where ended_at_ms is null' 
   );
   return {
     dbPath: DB_PATH,
@@ -146,19 +180,27 @@ function resolveSession(arg) {
   return row?.session_id || null;
 }
 
-function readSession(sessionArg, limit = 30, includeThinking = false) {
+/**
+ * 读一个会话的消息。默认取最后 limit 条（最新在最前返回时已 reverse 成时间顺序）。
+ * before 传消息 id 可以继续往前翻——一个会话可能有上万条，只给 limit 就没法回溯。
+ */
+function readSession(sessionArg, limit = 30, includeThinking = false, before = null) {
   const sid = resolveSession(sessionArg);
   if (!sid) return { error: `找不到会话: ${sessionArg}` };
+  const useBefore = Number.isFinite(Number(before)) && Number(before) > 0;
   const rows = query(
-    "select role, created_at_ms, " +
+    "select id, role, created_at_ms, " +
     "json_extract(data_json,'$.msg_content') as content, " +
     "json_extract(data_json,'$.thinking_content') as thinking, " +
     "json_extract(data_json,'$.tool_calls') as toolCalls " +
-    "from local_runtime_message_rows where session_id=? order by id desc limit ?",
-    [sid, limit]
+    "from local_runtime_message_rows where session_id=? " +
+    (useBefore ? 'and id < ? ' : '') +
+    "order by id desc limit ?",
+    useBefore ? [sid, Number(before), limit] : [sid, limit]
   );
   const messages = rows.reverse().map((r) => {
     const m = {
+      id: Number(r.id),
       role: r.role,
       time: localTime(r.created_at_ms),
       content: r.content || '',
@@ -172,7 +214,14 @@ function readSession(sessionArg, limit = 30, includeThinking = false) {
     if (includeThinking && r.thinking) m.thinking = r.thinking;
     return m;
   });
-  return { sessionId: sid, returned: messages.length, messages };
+  return {
+    sessionId: sid,
+    returned: messages.length,
+    // 给调用方一个继续往前翻的锚点；没有更早的消息就是 null
+    oldestId: messages.length ? messages[0].id : null,
+    hasMore: messages.length === limit,
+    messages,
+  };
 }
 
 function tailSessions(count = 3, perSession = 2) {
@@ -182,21 +231,59 @@ function tailSessions(count = 3, perSession = 2) {
   });
 }
 
-function search(queryText, limit = 20) {
+/**
+ * 跨会话搜索。
+ *
+ * 默认同时搜**会话标题**和**消息正文**——只搜正文的话，"那个讨论 X 的会话"根本找不到，
+ * 而按标题找会话是最高频的用法。标题命中排在前面，因为那是"定位到会话"，
+ * 正文命中是"定位到某句话"，粒度不同。
+ */
+function search(queryText, limit = 20, includeTitles = true) {
+  const q = String(queryText ?? '').trim();
+  // 空关键词会退化成 LIKE '%%'，把最近 20 条全捞出来冒充"搜索结果"——静默给错答案。
+  if (!q) throw new Error('搜索关键词不能为空');
+  // LIKE 里 % 和 _ 是通配符，用户搜这两个字符时会被当成模式，得转义
+  const escaped = q.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const pattern = `%${escaped}%`;
+
+  const hits = [];
+  if (includeTitles) {
+    const titleRows = query(
+      'select session_id, title, status, updated_at_ms from local_runtime_sessions ' +
+      "where archived = 0 and title like ? escape '\\' " +
+      'order by updated_at_ms desc limit ?',
+      [pattern, Math.max(1, Math.min(limit, 20))]
+    );
+    for (const r of titleRows) {
+      hits.push({
+        kind: 'session',
+        sessionId: r.session_id,
+        title: r.title || '',
+        status: r.status,
+        time: localTime(r.updated_at_ms),
+        snippet: clip(r.title, 200),
+      });
+    }
+  }
+
   const rows = query(
     "select session_id, role, created_at_ms, " +
     "json_extract(data_json,'$.msg_content') as content " +
     "from local_runtime_message_rows " +
-    "where json_extract(data_json,'$.msg_content') like ? " +
+    "where json_extract(data_json,'$.msg_content') like ? escape '\\' " +
     "order by id desc limit ?",
-    [`%${queryText}%`, limit]
+    [pattern, limit]
   );
-  return rows.map((r) => ({
-    sessionId: r.session_id,
-    role: r.role,
-    time: localTime(r.created_at_ms),
-    snippet: clip(r.content, 200),
-  }));
+  for (const r of rows) {
+    hits.push({
+      kind: 'message',
+      sessionId: r.session_id,
+      role: r.role,
+      time: localTime(r.created_at_ms),
+      snippet: clip(r.content, 200),
+    });
+  }
+  return hits;
 }
 
 function pending() {
@@ -303,6 +390,34 @@ function sessionMeta(sessionId) {
  * 判定"跑完"用两个信号：会话状态回到 idle，且最后一条 assistant 消息有正文。
  * 这比数消息条数可靠——流式输出过程中会不断追加空 content 的工具调用消息。
  */
+/**
+ * 单次检查：这个会话跑完了吗？
+ * 不睡眠、不重试，给轮询器用——轮询器自己控制节奏，
+ * 传 interval=0 进 waitForResult 会变成 1 秒空转，白烧 CPU。
+ */
+function checkResult(sessionId, afterMessageId) {
+  const row = one('select status from local_runtime_sessions where session_id = ?', [sessionId]);
+  const status = row?.status || null;
+  const msg = one(
+    "select id, role, created_at_ms, json_extract(data_json,'$.msg_content') as content "
+    + "from local_runtime_message_rows where session_id = ? and id > ? order by id desc limit 1",
+    [sessionId, afterMessageId]
+  );
+  let best = null;
+  let lastSeen = afterMessageId;
+  if (msg) {
+    lastSeen = Number(msg.id);
+    const text = (msg.content || '').trim();
+    if (msg.role === 'assistant' && text) best = { id: Number(msg.id), text };
+  }
+  return {
+    status,
+    lastSeen,
+    best,
+    done: status === 'idle' && Boolean(best),
+  };
+}
+
 function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, intervalMs = 3000) {
   const started = Date.now();
   const deadline = started + timeoutSeconds * 1000;
@@ -310,28 +425,15 @@ function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, interval
   let best = null;
 
   while (Date.now() < deadline) {
-    const row = one(
-      'select status from local_runtime_sessions where session_id = ?',
-      [sessionId]
-    );
-    const status = row?.status || null;
+    const c = checkResult(sessionId, lastSeen);
+    if (c.lastSeen !== lastSeen) lastSeen = c.lastSeen;
+    if (c.best) best = c.best;
 
-    const msg = one(
-      "select id, role, created_at_ms, json_extract(data_json,'$.msg_content') as content "
-      + "from local_runtime_message_rows where session_id = ? and id > ? order by id desc limit 1",
-      [sessionId, lastSeen]
-    );
-    if (msg) {
-      lastSeen = Number(msg.id);
-      const text = (msg.content || '').trim();
-      if (msg.role === 'assistant' && text) best = { id: Number(msg.id), text };
-    }
-
-    // 状态回到 idle 且已经拿到正文 → 这一轮结束了
-    if (status === 'idle' && best) {
+    if (c.done) {
       return {
         done: true,
         sessionId,
+        waitedAt: localTime(Date.now()),
         waitedSeconds: Math.round((Date.now() - started) / 1000),
         lastAssistantMessageId: best.id,
         result: best.text,
@@ -460,6 +562,7 @@ module.exports = {
   maxMessageId,
   waitForUserMessage,
   waitForResult,
+  checkResult,
   localTime,
   clip,
 };

@@ -25,7 +25,7 @@
   "scripts": {
     "start": "node mcp-server.js",
     "doctor": "node scripts/doctor.js",
-    "test": "node tests/contract.test.js && node tests/policy.test.js && node tests/questionnaire.test.js && node tests/ocr-match.test.js && node tests/smoke.test.js",
+    "test": "node tests/contract.test.js && node tests/policy.test.js && node tests/questionnaire.test.js && node tests/ocr-match.test.js && node tests/edge.test.js && node tests/smoke.test.js",
     "pack:npm": "node scripts/build-npm-package.js",
     "pack:mcpb": "node scripts/build-mcpb.js",
     "test:contract": "node tests/contract.test.js",

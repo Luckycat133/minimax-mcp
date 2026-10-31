@@ -38,11 +38,12 @@
       "name": "minimax_read_session",
       "intent": "读某个会话的消息",
       "input": {
-        "session": "会话 ID 或 list_sessions 返回的序号（必填）",
-        "limit": "integer 1-200, 默认 30",
-        "includeThinking": "boolean, 默认 false"
+        "session": "string|number（必填）",
+        "limit": "integer, 默认 30",
+        "includeThinking": "boolean, 默认 false",
+        "before": "integer, 可选；从这个消息 id 之前开始读，用于往前翻页"
       },
-      "output": "sessionId, returned, messages[{role,time,content,tools,thinking}]",
+      "output": "sessionId, returned, oldestId, hasMore, messages[{id,role,time,content,tools,thinking?}]",
       "sideEffects": "none"
     },
     {
@@ -242,7 +243,7 @@
       "name": "minimax_watch",
       "intent": "跑一轮主动巡检：比对快照产出事件，并按策略自动处理低风险的事",
       "input": {
-        "action": "tick|status|reset, 默认 tick",
+        "action": "tick|status|reset|config, 默认 tick；config 读写持久化策略",
         "dryRun": "boolean, 默认 false",
         "policy": "{mode, riskCeiling, minIdleSeconds, maxActionsPerTick, autoNudge, allowSessions}",
         "stalledMinutes": "integer, 默认 10",

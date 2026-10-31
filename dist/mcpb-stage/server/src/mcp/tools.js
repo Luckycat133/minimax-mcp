@@ -46,7 +46,8 @@ const TOOLS = [
       properties: {
         session: { type: 'string', description: '会话 ID 或序号' },
         limit: { type: 'integer', minimum: 1, maximum: 200, default: 30 },
-        includeThinking: { type: 'boolean', default: false },
+        includeThinking: { type: 'boolean', default: false, description: '是否包含思考过程（体积会大很多）' },
+        before: { type: 'integer', minimum: 1, description: '从这个消息 id 之前开始读，用于往前翻页；返回里的 oldestId 就是下次的 before' },
       },
       required: ['session'],
       additionalProperties: false,
@@ -275,7 +276,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['tick', 'status', 'reset'], default: 'tick' },
+        action: { type: 'string', enum: ['tick', 'status', 'reset', 'config'], default: 'tick', description: 'config=读写持久化策略（给定时任务用）' },
         dryRun: { type: 'boolean', default: false, description: 'true=只报告会做什么，不执行任何动作' },
         policy: {
           type: 'object',

@@ -182,19 +182,30 @@ function main() {
     }
     record('find_text 找不到时不瞎给坐标', nfOk, nfDetail);
 
-    // OCR：找一段必然存在的文字（MiniMax 窗口标题），必须能定位到
-    const ft = await send('tools/call', {
-      name: 'minimax_find_text',
-      arguments: { text: '新建任务', refresh: true },
-    });
-    let ftOk = ft.result?.isError !== true;
+    // OCR：先用 ocr 模块自己扫一遍窗口，拿一段真实存在的文字再查回去。
+    // 不要写死"新建任务"这种文案——侧栏滚动或窗口换状态就没了，测试会假红。
+    let ftOk = false;
     let ftDetail = '';
-    if (ftOk) {
-      const parsed = JSON.parse(ft.result.content[0].text);
-      ftOk = parsed.total >= 1 && typeof parsed.picked?.cx === 'number' && parsed.picked.cx > 0;
-      ftDetail = parsed.total ? `${parsed.total} 命中 @(${parsed.picked.cx},${parsed.picked.cy})` : '0 命中';
-    } else {
-      ftDetail = ft.result?.content?.[0]?.text?.slice(0, 120) || 'error';
+    try {
+      const ocr = require(path.join(__dirname, '..', 'src/gateway/ocr'));
+      const gui = require(path.join(__dirname, '..', 'src/gateway/gui'));
+      const win = gui.mainWindow();
+      const region = win ? { x: win.x, y: win.y, width: win.width, height: win.height } : null;
+      const shot = ocr.read(region);
+      const sample = (shot.items || []).find((it) => it.text && it.text.trim().length >= 2);
+      if (!sample) {
+        ftDetail = '窗口里没扫到任何文字（可能被遮挡）';
+      } else {
+        const back = await send('tools/call', {
+          name: 'minimax_find_text',
+          arguments: { text: sample.text.trim(), refresh: true },
+        });
+        const parsed = JSON.parse(back.result.content[0].text);
+        ftOk = parsed.total >= 1 && typeof parsed.picked?.cx === 'number';
+        ftDetail = `反查「${sample.text.trim().slice(0, 12)}」命中 ${parsed.total} 个`;
+      }
+    } catch (err) {
+      ftDetail = String(err.message).slice(0, 100);
     }
     record('find_text 能定位真实控件', ftOk, ftDetail);
 

@@ -13,8 +13,23 @@ const tasks = require('./tasks');
 
 /** 客户端是否协商了 Tasks 扩展。 */
 let tasksEnabled = false;
-/** 待推送的状态通知，由轮询器写入、主循环发出。 */
-const notifications = [];
+/** 轮询器只能起一个，客户端重复发 initialized 不该叠加定时器。 */
+let pollerStarted = false;
+
+/**
+ * 立刻把通知写到 stdout。
+ *
+ * 原来是把通知攒进数组、等下一次收到客户端消息时一起发——但客户端订阅完就是等，
+ * 不会再发消息，于是通知永远卡在数组里。这是实打实的 bug：订阅了却收不到。
+ * stdout.write 对单次调用是原子的，直接写就行。
+ */
+function emit(method, params) {
+  try {
+    process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
+  } catch {
+    /* 客户端已经断开，写不进去就算了 */
+  }
+}
 
 function negotiateProtocol(requested) {
   if (!requested) return PROTOCOL_VERSIONS[0];
@@ -22,22 +37,25 @@ function negotiateProtocol(requested) {
   return PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
 }
 
-function emit(method, params) {
-  notifications.push({ jsonrpc: '2.0', method, params });
-}
-
-/** 轮询所有 working 任务，状态一变就发 notifications/tasks/status。 */
+/**
+ * 轮询所有 working 任务，状态一变就发 notifications/tasks/status。
+ *
+ * 用 checkResult 做单次检查，不要调 waitForResult(…,1,0)——
+ * 那会以 0ms 间隔空转整整 1 秒/任务，50 个任务就是 50 秒 CPU 满载。
+ */
 function startTaskPoller() {
+  if (pollerStarted) return;
+  pollerStarted = true;
   const tick = () => {
+    const db = require('../gateway/db');
     for (const t of tasks.list(50)) {
       if (t.status !== 'working') continue;
-      const db = require('../gateway/db');
-      const r = db.waitForResult(t.sessionId, t.afterMessageId, 1, 0);
+      const r = db.checkResult(t.sessionId, t.afterMessageId || 0);
       if (r.done) {
         tasks.update(t.taskId, {
           status: 'completed',
           statusMessage: 'MiniMax 已跑完',
-          result: r.result,
+          result: r.best.text,
         });
         emit('notifications/tasks/status', {
           taskId: t.taskId,
@@ -153,10 +171,6 @@ function startStdioServer() {
     for (const m of batch) {
       const res = handle(m);
       if (res) process.stdout.write(`${JSON.stringify(res)}\n`);
-    }
-    // 把轮询积攒的通知发出去
-    while (notifications.length) {
-      process.stdout.write(`${JSON.stringify(notifications.shift())}\n`);
     }
   });
 

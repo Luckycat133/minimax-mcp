@@ -119,17 +119,25 @@ function displayScale() {
 }
 
 /** 取 MiniMax 的主窗口：优先在屏的，其次用全部窗口兜底（避开屏幕外的侧栏窗口）。 */
+/**
+ * 主窗口的宽度下限。
+ * 原来是硬编码 800，那是在 5K 屏上量出来的——用户把窗口拖窄到 700 时，
+ * 所有控制类工具都会报"找不到窗口"。现在放到 320，靠"优先焦点窗口 + 取最大"来避坑。
+ */
+const MIN_MAIN_WIDTH = Number(process.env.MINIMAX_MIN_WINDOW_WIDTH || 320);
+
 function mainWindow() {
+  // 焦点窗口优先：按键和输入就是去这里的，哪怕它比别的窗口小
   const focused = focusedWindow();
-  if (focused && focused.width > 800) {
+  if (focused && focused.width >= MIN_MAIN_WIDTH) {
     return { ...focused, visible: true, source: 'focused' };
   }
-  const onScreen = appWindows().filter((w) => w.width > 800);
+  const onScreen = appWindows().filter((w) => w.width >= MIN_MAIN_WIDTH);
   if (onScreen.length) {
     onScreen.sort((a, b) => b.width * b.height - a.width * a.height);
     return { ...onScreen[0], visible: true, source: 'largest' };
   }
-  const all = windowsAll().filter((w) => w.app === APP && w.width > 800);
+  const all = windowsAll().filter((w) => w.app === APP && w.width >= MIN_MAIN_WIDTH);
   if (all.length) {
     all.sort((a, b) => b.width * b.height - a.width * a.height);
     return { ...all[0], visible: false, source: 'all-windows' };
@@ -139,7 +147,11 @@ function mainWindow() {
 
 /** 用 LaunchServices 打开/激活 App。窗口被隐藏或在别的 Space 时，只有这条能把它拉回来。 */
 function openApp() {
-  execFileSync('open', ['-a', APP], { timeout: 20000 });
+  try {
+    execFileSync('open', ['-a', APP], { timeout: 20000 });
+  } catch (err) {
+    throw new Error(`启动 MiniMax Code 失败（可能没安装）：${String(err.stderr || err.message).slice(0, 200)}`);
+  }
   sleep(1200);
   return { opened: APP };
 }
@@ -242,10 +254,11 @@ function screenshot(name = 'shot', mode = 'screen', region = null) {
     const out = path.join(__dirname, '..', '..', 'screenshots');
     require('node:fs').mkdirSync(out, { recursive: true });
     const file = path.join(out, `${safe}_${Date.now()}.png`);
-    // screencapture -R 用的是像素；我们的坐标系是点，Retina 上要换算
-    const k = displayScale();
+    // screencapture -R 吃的是**屏幕点**（全局显示坐标系），和我们的坐标系一致，
+    // 不要乘 backing scale。Retina 上输出图片本身会是 2 倍像素，那是正常的。
+    // 之前这里乘过一次 scale，在 scale>1 的机器上会截到偏移且放大两倍的区域。
     execFileSync('screencapture', ['-x', '-R',
-      `${Math.round(region.x * k)},${Math.round(region.y * k)},${Math.round(region.width * k)},${Math.round(region.height * k)}`,
+      `${Math.round(region.x)},${Math.round(region.y)},${Math.round(region.width)},${Math.round(region.height)}`,
       file]);
     return { path: file };
   }

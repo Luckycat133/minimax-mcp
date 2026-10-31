@@ -21,6 +21,15 @@ const BIN = path.join(CACHE_DIR, 'ocr');
 /** 最近一次截图+OCR 的结果，短 TTL 内复用，避免连点几步就截几次屏。 */
 let lastShot = null;
 
+/**
+ * 缓存键必须包含区域。否则先扫窗口再扫全屏时，会拿窗口的缓存去匹配全屏的坐标——
+ * 坐标全错，而且错得很隐蔽（能匹配上，只是位置不对）。
+ */
+function regionKey(region) {
+  if (!region) return 'full';
+  return `${Math.round(region.x)},${Math.round(region.y)},${Math.round(region.width)},${Math.round(region.height)}`;
+}
+
 function sh(cmd, args, opts = {}) {
   return execFileSync(cmd, args, {
     encoding: 'utf8',
@@ -82,7 +91,7 @@ function read(region = null, opts = {}) {
       count: parsed.count,
       items: parsed.items || [],
     };
-    lastShot = { at: Date.now(), result };
+    lastShot = { at: Date.now(), key: regionKey(region), result };
     return result;
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* 忽略 */ }
@@ -140,7 +149,10 @@ function match(items, query, opts = {}) {
  */
 function find(query, opts = {}) {
   const region = opts.region || null;
-  const cacheOk = lastShot && !opts.refresh && (Date.now() - lastShot.at) < (opts.ttlMs ?? 3000);
+  const cacheOk = lastShot
+    && !opts.refresh
+    && lastShot.key === regionKey(region)
+    && (Date.now() - lastShot.at) < (opts.ttlMs ?? 3000);
   const shot = cacheOk ? lastShot.result : read(region);
   const hits = match(shot.items, query, opts);
   const index = Number.isInteger(opts.index) ? opts.index : 0;

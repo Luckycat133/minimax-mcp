@@ -205,9 +205,11 @@ function decideQuestion(detail, ctx = {}) {
   if (!risk.autoAnswerable) {
     return { action: 'ask_human', risk, why: '虽然等级不高，但没有推荐答案，不该替人挑' };
   }
-  if (ctx.idleSeconds !== undefined && ctx.idleSeconds < policy.minIdleSeconds) {
+  // 读不到闲置时间就按 0 处理 —— 宁可不动，也不能在不确定的情况下抢焦点
+  const idle = ctx.idleSeconds ?? 0;
+  if (idle < policy.minIdleSeconds) {
     // 人在机器前：不该抢焦点代答，但这件事仍然需要人处理，所以要报出来而不是吞掉
-    return { action: 'ask_human', risk, why: `人就在机器前（闲置 ${ctx.idleSeconds}s），留给你自己点，不抢焦点` };
+    return { action: 'ask_human', risk, why: `人就在机器前（闲置 ${idle}s），留给你自己点，不抢焦点` };
   }
   return { action: 'auto_answer', risk, why: '低风险 + 有推荐答案 + 人不在，可以代答' };
 }
@@ -230,8 +232,9 @@ function decideNudge(session, ctx = {}) {
   if (!risk.autoSendable) {
     return { action: 'skip', risk, why: '催促文案本身含风险词，不自动发' };
   }
-  if (ctx.idleSeconds !== undefined && ctx.idleSeconds < policy.minIdleSeconds) {
-    return { action: 'skip', risk, why: `人还在用机器（闲置 ${ctx.idleSeconds}s），不抢焦点` };
+  // 同上：读不到闲置时间按 0 处理，不自动发消息
+  if ((ctx.idleSeconds ?? 0) < policy.minIdleSeconds) {
+    return { action: 'skip', risk, why: `人还在用机器（闲置 ${ctx.idleSeconds ?? 0}s），不抢焦点` };
   }
   if (ctx.lastNudgeMinutes !== undefined && ctx.lastNudgeMinutes < nudge.cooldownMinutes) {
     return { action: 'skip', risk, why: `${ctx.lastNudgeMinutes} 分钟前催过，冷却中` };

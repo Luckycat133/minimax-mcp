@@ -45,7 +45,9 @@ minimax_pending                                    # 谁在等你回答
 minimax_tasks {status: "running"}                  # 还有什么在跑
 minimax_list_sessions                              # 需要精确定位时再列全部
 minimax_read_session {session: "3", limit: 20}     # 读某个会话（可传序号或 mvs_ ID）
-minimax_search {query: "关键词"}                    # 跨会话全文搜索
+minimax_read_session {session: "3", limit: 20, before: 17884}  # 往前翻页
+minimax_read_session {session: "3", limit: 20, before: 17884}  # 往前翻页
+minimax_search {query: "关键词"}                    # 同时搜会话标题和消息正文
 ```
 
 判断"卡住"的可靠标准：末条消息 role 是 `user` 且时间早已过去 → 那条指令没被处理。
@@ -245,6 +247,30 @@ minimax_events {since: "2026-10-31T00:00:00"}  # 拉取这段时间的事件
 
 自动动作只在你离开 ≥ `minIdleSeconds` 时执行。人在机器前时不会抢焦点代答，
 但这件事仍然会进 `needsHuman`——**不执行不等于吞掉**。
+
+### 策略持久化
+
+定时任务没法带参数，所以策略要能落盘：
+
+```
+minimax_watch {action: "config"}                                   # 读当前生效策略
+minimax_watch {action: "config", policy: {minIdleSeconds: 600}}    # 只改这一项，别的保留
+```
+
+写在 `~/.minimax-mcp/policy.json`，生效顺序是 **默认 ← 文件 ← 本次调用参数**。
+`autoNudge` 是子对象，只传 `{cooldownMinutes: 120}` 不会冲掉里面的 `message`。
+
+### 策略持久化
+
+定时任务没法带参数，所以策略要能落盘：
+
+```
+minimax_watch {action: "config"}                                   # 读当前生效策略
+minimax_watch {action: "config", policy: {minIdleSeconds: 600}}    # 只改这一项，别的保留
+```
+
+写在 `~/.minimax-mcp/policy.json`，生效顺序是 **默认 ← 文件 ← 本次调用参数**。
+`autoNudge` 是子对象，只传 `{cooldownMinutes: 120}` 不会冲掉里面的 `message`。
 
 ### 装成定时任务
 

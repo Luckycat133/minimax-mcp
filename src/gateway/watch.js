@@ -26,6 +26,7 @@ const DIR = path.join(os.homedir(), '.minimax-mcp');
 const STATE_FILE = path.join(DIR, 'watch-state.json');
 const EVENT_FILE = path.join(DIR, 'events.jsonl');
 const REPORT_FILE = path.join(DIR, 'report.md');
+const POLICY_FILE = path.join(DIR, 'policy.json');
 const MAX_EVENT_BYTES = 1024 * 1024;
 const EMIT_TTL_MS = 24 * 3600 * 1000;
 
@@ -48,6 +49,47 @@ function idleSeconds() {
   } catch {
     return null;
   }
+}
+
+/**
+ * 读持久化的策略。定时任务（launchd）没法带参数，所以策略必须能落到文件里，
+ * 否则"主动巡检"就只能靠环境变量配，改一次要重装 plist。
+ */
+function loadPolicy() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(POLICY_FILE, 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 合并写入策略（只覆盖给出的字段）。 */
+function savePolicy(patch = {}) {
+  const current = loadPolicy();
+  const merged = { ...current, ...patch };
+  if (patch.autoNudge) merged.autoNudge = { ...(current.autoNudge || {}), ...patch.autoNudge };
+  ensureDir();
+  fs.writeFileSync(POLICY_FILE, `${JSON.stringify(merged, null, 2)}\n`);
+  return merged;
+}
+
+/** 生效策略 = 默认 ← 文件 ← 本次调用。 */
+function effectivePolicy(overrides = {}) {
+  const given = Object.fromEntries(
+    Object.entries(overrides || {}).filter(([, v]) => v !== undefined && v !== null)
+  );
+  const fromFile = loadPolicy();
+  return {
+    ...policyMod.DEFAULT_POLICY,
+    ...fromFile,
+    ...given,
+    autoNudge: {
+      ...policyMod.DEFAULT_POLICY.autoNudge,
+      ...(fromFile.autoNudge || {}),
+      ...(given.autoNudge || {}),
+    },
+  };
 }
 
 function loadState() {
@@ -178,9 +220,12 @@ function readEvents(since, limit = 50) {
     return { events: [], count: 0 };
   }
   let filtered = rows;
-  if (since) {
-    const t = typeof since === 'number' ? since : Date.parse(since);
-    if (!Number.isNaN(t)) filtered = rows.filter((e) => Date.parse(e.at) >= t);
+  if (since !== undefined && since !== null && since !== '') {
+    const t = typeof since === 'number' ? since : Date.parse(String(since));
+    if (Number.isNaN(t)) {
+      throw new Error(`since 不是合法时间：${JSON.stringify(since)}；用 ISO 时间或毫秒时间戳`);
+    }
+    filtered = rows.filter((e) => Date.parse(e.at) >= t);
   }
   return { events: filtered.slice(-limit), count: filtered.length, total: rows.length };
 }
@@ -205,7 +250,7 @@ function pruneEmitted(emitted, now) {
  * 返回 {at, idleSeconds, events, actions, needsHuman, counts}
  */
 function tick(opts = {}) {
-  const policy = { ...policyMod.DEFAULT_POLICY, ...(opts.policy || {}) };
+  const policy = effectivePolicy(opts.policy);
   const execute = opts.execute || (() => ({ skipped: true, reason: '没有注入执行器' }));
   const dryRun = opts.dryRun === true;
   const now = Date.now();
@@ -514,6 +559,8 @@ function status() {
   return {
     statePath: STATE_FILE,
     eventPath: EVENT_FILE,
+    policyPath: POLICY_FILE,
+    policy: effectivePolicy(),
     lastRun: st.lastRun,
     trackedSessions: Object.keys(st.sessions).length,
     idleSeconds: idle,
@@ -526,4 +573,4 @@ function reset() {
   return { reset: true, statePath: STATE_FILE };
 }
 
-module.exports = { tick, status, reset, readEvents, idleSeconds, snapshot, STATE_FILE, EVENT_FILE, REPORT_FILE };
+module.exports = { tick, status, reset, readEvents, idleSeconds, snapshot, loadPolicy, savePolicy, effectivePolicy, STATE_FILE, EVENT_FILE, REPORT_FILE, POLICY_FILE };

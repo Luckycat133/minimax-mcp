@@ -12,6 +12,8 @@ const qn = require('./questionnaire');
 const brief = require('../gateway/brief');
 const audit = require('../gateway/audit');
 const ann = require('./annotations');
+const { validateArgs } = require('./validate');
+const { TOOLS } = require('./tools');
 const watch = require('../gateway/watch');
 const tasks = require('./tasks');
 
@@ -63,6 +65,23 @@ function blockedByOverlay(x, y) {
 }
 
 /**
+ * 解析 "x,y"。格式不对就抛错。
+ *
+ * 为什么必须挡：`"abc".split(',')` 得到 [NaN]，NaN 一路传到点击就是"点了但什么也没发生"，
+ * 调用方还以为是界面没响应。这类静默失败比报错难查得多。
+ */
+function parseAt(at) {
+  const parts = String(at).split(',').map((v) => Number(v.trim()));
+  if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n))) {
+    throw new Error(`at 坐标格式不对：${JSON.stringify(at)}；应该像 "640,880"`);
+  }
+  const [x, y] = parts;
+  if (x < 0 || y < 0) throw new Error(`at 坐标不能是负数：${x},${y}`);
+  if (x > 20000 || y > 20000) throw new Error(`at 坐标看起来不在任何屏幕上：${x},${y}`);
+  return { x, y, text: `${x},${y}` };
+}
+
+/**
  * 按锚点找文字，找不到就缩短再试。
  * 原因：选项文案常常换行渲染，OCR 会把它切成两条观测，长锚点跨行必然匹配不上。
  */
@@ -87,6 +106,15 @@ function dispatch(name, args = {}) {
         const action = args.action || 'tick';
         if (action === 'status') return ok(watch.status());
         if (action === 'reset') return ok(watch.reset());
+        if (action === 'config') {
+          const saved = args.policy ? watch.savePolicy(args.policy) : watch.loadPolicy();
+          return ok({
+            policyPath: watch.POLICY_FILE,
+            saved: Boolean(args.policy),
+            policy: watch.effectivePolicy(),
+            file: saved,
+          });
+        }
         const r = watch.tick({
           policy: args.policy,
           dryRun: args.dryRun === true,
@@ -118,7 +146,7 @@ function dispatch(name, args = {}) {
         return ok({ sessions: db.listSessions(args.limit ?? 20) });
 
       case 'minimax_read_session': {
-        const r = db.readSession(args.session, args.limit ?? 30, args.includeThinking === true);
+        const r = db.readSession(args.session, args.limit ?? 30, args.includeThinking === true, args.before ?? null);
         return r.error ? fail(r.error) : ok(r);
       }
 
@@ -126,7 +154,7 @@ function dispatch(name, args = {}) {
         return ok({ sessions: db.tailSessions(args.count ?? 3, args.perSession ?? 2) });
 
       case 'minimax_search':
-        return ok({ hits: db.search(args.query, args.limit ?? 20) });
+        return ok({ hits: db.search(args.query, args.limit ?? 20, args.includeTitles !== false) });
 
       case 'minimax_pending':
         return ok({ pending: db.pending() });
@@ -151,8 +179,20 @@ function dispatch(name, args = {}) {
       case 'minimax_activate': {
         let win = gui.mainWindow();
         let recovered = null;
+        let launched = false;
         if (!win) {
-          return fail('找不到 MiniMax Code 窗口，进程可能没启动');
+          // 没窗口可能只是没启动。对"别的 agent 来用"这个场景，能自己拉起来比报错有用。
+          try {
+            gui.openApp();
+            gui.sleep(2500);
+            launched = true;
+          } catch (err) {
+            return fail(String(err.message || err));
+          }
+          win = gui.mainWindow();
+          if (!win) {
+            return fail('尝试启动 MiniMax Code 后仍然找不到窗口，请手动打开一次确认。');
+          }
         }
         if (!win.visible) {
           // 窗口被隐藏、最小化或跑到别的 Space：OnScreenOnly 拿不到它，
@@ -166,6 +206,7 @@ function dispatch(name, args = {}) {
         }
         return ok({
           recovered,
+          launched,
           activeApp: gui.activeApp(),
           topmostWindow: gui.topmostApp(),
           window: win,
@@ -189,7 +230,8 @@ function dispatch(name, args = {}) {
         const force = args.force === true;
 
         const win = gui.mainWindow();
-        const coords = gui.inputCoords(win, args.at, layout);
+        const atParsed = args.at !== undefined && args.at !== null ? parseAt(args.at) : null;
+        const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, layout);
         if (!coords) return fail('拿不到 MiniMax 窗口位置，请用 at 指定输入框坐标');
 
         // 预览模式：只报告会发生什么，不点、不粘、不发。只读，所以不受守卫限制。
@@ -284,15 +326,24 @@ function dispatch(name, args = {}) {
       }
 
       case 'minimax_get_result': {
-        let sid = args.sessionId ? db.resolveSession(args.sessionId) : null;
-        if (!sid) {
+        let sid = null;
+        let fallback = false;
+        if (args.sessionId) {
+          sid = db.resolveSession(args.sessionId);
+          // 显式指定了却解析不出来，必须报错。
+          // 悄悄退回"最近活跃会话"会让调用方拿到别人的结果还以为是自己要的——这比报错危险得多。
+          if (!sid) return fail(`找不到会话: ${args.sessionId}`);
+        } else {
           const recent = db.recentlyTouchedSessions(1)[0] || db.listSessions(1)[0];
           if (!recent) return fail('找不到会话');
           sid = recent.sessionId;
+          fallback = true;
         }
         const after = Number(args.afterMessageId || 0);
         const timeout = Number(args.timeoutSeconds || 300);
-        return ok(db.waitForResult(sid, after, timeout));
+        const out = db.waitForResult(sid, after, timeout);
+        if (fallback) out.note = '没指定 sessionId，用的是最近活跃会话；要精确请显式传 sessionId';
+        return ok(out);
       }
 
       case 'minimax_draft_answer': {
@@ -330,6 +381,11 @@ function dispatch(name, args = {}) {
         const { answers, errors } = qn.normalizeSelections(detail, raw);
         if (errors.length) {
           return fail(`答案有问题，未提交：\n- ${errors.join('\n- ')}`);
+        }
+        // 防御：问卷没有步骤、或所有步骤都不是必答时，answers 会是空的。
+        // 这时候如果继续走下去，会"点了提交按钮但什么都没选"——比报错更糟。
+        if (!answers.length) {
+          return fail('这条提问解析不出任何可答的步骤，拒绝提交空答案。用 minimax_draft_answer 看看原始结构。');
         }
         const payload = qn.buildReplyPayload(detail, answers);
         const plan = qn.clickPlan(detail, answers);
@@ -516,9 +572,9 @@ function dispatch(name, args = {}) {
         // 显式给了坐标就用坐标；否则用会话标题去**左侧栏**里 OCR 找。
         // 注意：标题在侧栏和主区域顶部都会出现，必须只认左侧那一列，否则会点到顶栏。
         let target = null;
-        if (args.at) {
-          const [x, y] = String(args.at).split(',').map(Number);
-          target = { cx: x, cy: y, text: '(手动坐标)' };
+        if (args.at !== undefined && args.at !== null) {
+          const p = parseAt(args.at);
+          target = { cx: p.x, cy: p.y, text: '(手动坐标)' };
         } else {
           const meta = db.sessionMeta(sid);
           const candidates = [meta?.title, meta?.firstUserMessage]
@@ -594,6 +650,17 @@ function dispatch(name, args = {}) {
  */
 function callTool(name, args = {}) {
   const started = Date.now();
+
+  // 先用工具自己的 schema 挡一道。参数错就立刻报清楚，别让它变成 NaN 点歪坐标。
+  const tool = TOOLS.find((t) => t.name === name);
+  if (tool) {
+    const v = validateArgs(tool, args);
+    if (!v.ok) {
+      return fail(`参数不合法，未执行：\n- ${v.errors.join('\n- ')}`);
+    }
+    args = v.args;
+  }
+
   let result;
   try {
     result = dispatch(name, args);
