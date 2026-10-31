@@ -10,5 +10,7 @@
         "MINIMAX_SQLITE_BIN": "sqlite3"
       }
     }
-  }
+  },
+  "_note": "command 用的是 PATH 里的 node（需要 >=22）。如果客户端不继承 shell PATH，改成绝对路径，例如 /opt/homebrew/bin/node。",
+  "_tools": "25 个工具，13 只读 / 9 只动界面 / 3 会改对话。建议客户端对 destructiveHint=true 的工具做二次确认。"
 }

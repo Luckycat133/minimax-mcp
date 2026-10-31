@@ -420,7 +420,22 @@ function tick(opts = {}) {
     });
   }
 
-  // ---------- 4. 后台任务失败 ----------
+  // ---------- 4. 出错但没人管的会话 ----------
+  // 错误不是"我能修的事"，但它必须出现在 needsHuman 里，
+  // 否则消费方只读 needsHuman 就会漏掉"这个会话彻底跑不了"。
+  for (const item of b.items) {
+    if (item.kind !== 'error') continue;
+    needsHuman.push({
+      sessionId: item.sessionId,
+      title: item.title,
+      risk: 'n/a',
+      why: item.why,
+      next: item.next,
+      handled: false,
+    });
+  }
+
+  // ---------- 5. 后台任务失败 ----------
   for (const tf of b.taskFailures) {
     emit({
       key: `task_failed:${tf.sessionId}:${tf.failures}`,
