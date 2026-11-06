@@ -13,9 +13,9 @@ const ROOT = path.join(__dirname, '..');
 const { TOOLS, TOOL_NAMES, CONTRACT_VERSION, SERVER_INFO } = require(path.join(ROOT, 'src/mcp'));
 
 const results = [];
-const check = (label, fn) => {
+const check = async (label, fn) => {
   try {
-    fn();
+    await fn();
     results.push({ label, pass: true });
     console.log(`[OK]   ${label}`);
   } catch (err) {
@@ -106,21 +106,21 @@ check('SKILL.md 提到每个工具名', () => {
   assert.deepStrictEqual(missing, [], `SKILL.md 没提到: ${missing.join(', ')}`);
 });
 
-check('Tasks 扩展：协商后能力被回告', () => {
+check('Tasks 扩展：协商后能力被回告', async () => {
   const { handle } = require(path.join(ROOT, 'src/mcp'));
-  const withTasks = handle({
+  const withTasks = await handle({
     jsonrpc: '2.0', id: 1, method: 'initialize',
     params: { protocolVersion: '2024-11-05', capabilities: { tasks: {} }, clientInfo: { name: 't', version: '1' } },
   });
   assert.ok(withTasks.result.capabilities.tasks, '声明了 tasks 就必须回告 tasks 能力');
-  const without = handle({
+  const without = await handle({
     jsonrpc: '2.0', id: 2, method: 'initialize',
     params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 't', version: '1' } },
   });
   assert.ok(!without.result.capabilities.tasks, '没声明就不该回告 tasks 能力');
 });
 
-check('Tasks 扩展：五个方法都在', () => {
+check('Tasks 扩展：五个方法都在', async () => {
   const { handle } = require(path.join(ROOT, 'src/mcp'));
   const base = { jsonrpc: '2.0' };
   for (const [method, params] of [
@@ -129,7 +129,7 @@ check('Tasks 扩展：五个方法都在', () => {
     ['tasks/result', { taskId: 'nope' }],
     ['tasks/cancel', { taskId: 'nope' }],
   ]) {
-    const r = handle({ ...base, id: 1, method, params });
+    const r = await handle({ ...base, id: 1, method, params });
     assert.ok(r.result || r.error, `${method} 必须有响应`);
     assert.ok(!/方法不存在/.test(r.error?.message || ''), `${method} 未实现`);
   }
@@ -222,6 +222,9 @@ check('审计会脱敏长文本', () => {
   assert.strictEqual(out.list, '[2 项]');
 });
 
-const failed = results.filter((r) => !r.pass).length;
-console.log(`\n${results.length - failed}/${results.length} 通过`);
-process.exit(failed === 0 ? 0 : 1);
+// 上面的 check 是异步的（handle 现在是 async），等所有断言落地再汇总
+setImmediate(() => {
+  const failed = results.filter((r) => !r.pass).length;
+  console.log(`\n${results.length - failed}/${results.length} 通过`);
+  process.exit(failed === 0 ? 0 : 1);
+});

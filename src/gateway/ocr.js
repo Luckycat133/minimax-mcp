@@ -68,30 +68,65 @@ function ocrAvailable() {
   }
 }
 
+function sanitizeRegion(r) {
+  if (!r) return null;
+  const x = Math.max(0, Math.round(r.x || 0));
+  const y = Math.max(0, Math.round(r.y || 0));
+  const width = Math.max(20, Math.round(r.width || 100));
+  const height = Math.max(20, Math.round(r.height || 100));
+  return { x, y, width, height };
+}
+
 /**
  * 截一块屏幕并识别。
  * region 省略则截全屏。返回 { items:[{text,x,y,w,h,cx,cy,conf}], pointWidth, ... }
  */
 function read(region = null, opts = {}) {
   const bin = ensureBinary();
+  const validRegion = sanitizeRegion(region);
   const tmp = path.join(os.tmpdir(), `minimax-ocr-${process.pid}-${Date.now()}.png`);
   const args = ['-x'];
-  if (region) {
-    args.push('-R', `${Math.round(region.x)},${Math.round(region.y)},${Math.round(region.width)},${Math.round(region.height)}`);
+  if (validRegion) {
+    args.push('-R', `${validRegion.x},${validRegion.y},${validRegion.width},${validRegion.height}`);
   }
   args.push(tmp);
   try {
-    sh('screencapture', args, { timeout: 30000 });
-    const out = region
-      ? sh(bin, [tmp, String(region.x), String(region.y), String(region.width), String(region.height)], { timeout: 120000 })
+    try {
+      sh('screencapture', args, { timeout: 30000 });
+    } catch (scErr) {
+      // 1. 优先回退到 CDP 零权限高速截屏（由 Chromium Compositor 直接输出渲染帧，无需 macOS 录屏权限）
+      const cdpShotScript = path.join(__dirname, '..', '..', 'scripts', 'cdp-shot.js');
+      let cdpOk = false;
+      if (fs.existsSync(cdpShotScript)) {
+        try {
+          sh(process.execPath, [cdpShotScript, tmp], { timeout: 10000 });
+          cdpOk = true;
+        } catch (_) {}
+      }
+
+      // 2. 其次回退到 Codex Computer Use (CUA) 原生无障碍截图
+      if (!cdpOk) {
+        const cuaScreenshot = path.join(__dirname, '..', '..', '..', 'codex-computer-use-mcp', 'bin', 'cua-screenshot');
+        if (fs.existsSync(cuaScreenshot)) {
+          sh(cuaScreenshot, [tmp], { timeout: 30000 });
+        } else {
+          const hint = /could not create image/i.test(String(scErr.message))
+            ? '屏幕截取失败：请确认当前 Agent 宿主（如 Terminal/Cursor/Claude）已在“系统设置 > 隐私与安全性 > 屏幕录制”中授权，或运行 node scripts/setup-permissions.js'
+            : scErr.message;
+          throw new Error(`OCR 截屏失败：${hint}`);
+        }
+      }
+    }
+    const out = validRegion
+      ? sh(bin, [tmp, String(validRegion.x), String(validRegion.y), String(validRegion.width), String(validRegion.height)], { timeout: 120000 })
       : sh(bin, [tmp], { timeout: 120000 });
     const parsed = JSON.parse(out);
     const result = {
-      region: region || { x: 0, y: 0, width: parsed.pointWidth, height: parsed.pointHeight },
+      region: validRegion || { x: 0, y: 0, width: parsed.pointWidth, height: parsed.pointHeight },
       count: parsed.count,
       items: parsed.items || [],
     };
-    lastShot = { at: Date.now(), key: regionKey(region), result };
+    lastShot = { at: Date.now(), key: regionKey(validRegion), result };
     return result;
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* 忽略 */ }

@@ -8,6 +8,7 @@
 const db = require('../gateway/db');
 const gui = require('../gateway/gui');
 const ocr = require('../gateway/ocr');
+const { cdp } = require('../gateway/cdp');
 const qn = require('./questionnaire');
 const brief = require('../gateway/brief');
 const audit = require('../gateway/audit');
@@ -99,7 +100,7 @@ function findByAnchor(anchor, region) {
   return null;
 }
 
-function dispatch(name, args = {}) {
+async function dispatch(name, args = {}, ctx = null) {
   try {
     switch (name) {
       case 'minimax_watch': {
@@ -115,13 +116,13 @@ function dispatch(name, args = {}) {
             file: saved,
           });
         }
-        const r = watch.tick({
+        const r = await watch.tick({
           policy: args.policy,
           dryRun: args.dryRun === true,
           stalledMinutes: args.stalledMinutes,
           finishedMinutes: args.finishedMinutes,
           // 自动动作也走 callTool，这样审计和注解都一致
-          execute: (tool, toolArgs) => callTool(tool, toolArgs),
+          execute: (tool, toolArgs) => callTool(tool, toolArgs, ctx),
         });
         return ok(r);
       }
@@ -139,14 +140,23 @@ function dispatch(name, args = {}) {
           limit: args.limit,
         }));
 
-      case 'minimax_status':
-        return ok(db.status());
+      case 'minimax_status': {
+        const s = db.status();
+        if (await cdp.isAvailable()) {
+          try {
+            s.quota = await cdp.getQuotaStatus();
+          } catch (_) {}
+        }
+        return ok(s);
+      }
 
       case 'minimax_list_sessions':
         return ok({ sessions: db.listSessions(args.limit ?? 20) });
 
       case 'minimax_read_session': {
-        const r = db.readSession(args.session, args.limit ?? 30, args.includeThinking === true, args.before ?? null);
+        const target = args.session || args.sessionId;
+        if (!target) return fail('缺少必填参数 session 或 sessionId');
+        const r = db.readSession(target, args.limit ?? 30, args.includeThinking === true, args.before ?? null);
         return r.error ? fail(r.error) : ok(r);
       }
 
@@ -264,6 +274,33 @@ function dispatch(name, args = {}) {
           );
         }
 
+        // 1. 优先走 CDP 零权限高速通道（无视遮挡、无需剪贴板污染、无需前台置顶）
+        if (!atParsed && await cdp.isAvailable()) {
+          try {
+            await cdp.typeMessage(args.message);
+            if (args.send !== true) {
+              return ok({ sent: false, note: '已通过 CDP 注入未发送；send=true 才会发送', via: 'cdp' });
+            }
+            const before = db.maxMessageId();
+            await cdp.sendMessage();
+            const hit = db.waitForUserMessage(before, args.message);
+            if (hit.ok) {
+              const payload = { sent: true, verified: true, sessionId: hit.sessionId, messageId: hit.messageId, via: 'cdp' };
+              if (tasksEnabled) {
+                const t = tasks.create({
+                  sessionId: hit.sessionId,
+                  afterMessageId: hit.messageId,
+                  messagePreview: String(args.message).slice(0, 80),
+                });
+                payload.taskId = t.taskId;
+                payload.note = '已创建任务；用 tasks/get 看状态、tasks/result 取结果，完成时会收到 notifications/tasks/status';
+              }
+              return ok(payload);
+            }
+          } catch (_) {}
+        }
+
+        // 2. 降级走传统的 CoreGraphics 模拟点击与系统剪贴板注入
         if (!gui.ensureFront()) {
           return fail('MiniMax 不是活跃应用（你可能正在用别的 App），已放弃操作，避免点到别的窗口');
         }
@@ -314,7 +351,6 @@ function dispatch(name, args = {}) {
       }
 
       case 'minimax_type': {
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
         // 打字会往用户正在编辑的输入框里塞东西，同样过活跃守卫。
         const busy = guardCandidates()
           .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
@@ -322,6 +358,18 @@ function dispatch(name, args = {}) {
         if (busy.length > 0 && args.force !== true) {
           return fail(`有会话刚还在活动（${busy.map((s) => `${s.idleSeconds}s 前`).join('；')}），已拒绝输入以免打扰。确认要输就加 force: true`);
         }
+
+        // 1. 优先走 CDP 零权限输入（无需前台聚焦，直接注入 TipTap/ProseMirror）
+        if (await cdp.isAvailable()) {
+          try {
+            const res = await cdp.typeMessage(args.text, { append: true });
+            if (res && res.ok) {
+              return ok({ typed: args.text.length, via: 'cdp', currentText: res.currentText });
+            }
+          } catch (_) {}
+        }
+
+        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
         return ok(gui.typeText(args.text));
       }
 
@@ -340,8 +388,8 @@ function dispatch(name, args = {}) {
           fallback = true;
         }
         const after = Number(args.afterMessageId || 0);
-        const timeout = Number(args.timeoutSeconds || 300);
-        const out = db.waitForResult(sid, after, timeout);
+        const timeout = args.timeoutSeconds !== undefined ? Number(args.timeoutSeconds) : 0;
+        const out = await db.waitForResult(sid, after, timeout, 3000, ctx && ctx.shouldStop);
         if (fallback) out.note = '没指定 sessionId，用的是最近活跃会话；要精确请显式传 sessionId';
         return ok(out);
       }
@@ -518,6 +566,17 @@ function dispatch(name, args = {}) {
       }
 
       case 'minimax_click_text': {
+        // 1. 优先尝试 CDP DOM 点击（免权限、100% 精准）
+        if (await cdp.isAvailable()) {
+          try {
+            const r = await cdp.clickElement({ text: args.text });
+            if (r && r.ok) {
+              return ok({ clicked: r.text || args.text, via: 'cdp', tag: r.clickedTag });
+            }
+          } catch (_) {}
+        }
+
+        // 2. 降级走 OCR 识别 + GUI 事件注入
         if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
         const win = gui.mainWindow();
         const region = args.region || (win ? { x: win.x, y: win.y, width: win.width, height: win.height } : null);
@@ -671,6 +730,35 @@ function dispatch(name, args = {}) {
         return ok(gui.pressKey(args.key, args.modifiers || []));
       }
 
+      case 'minimax_bot_message': {
+        const { botClient } = require('../gateway/bot');
+        const chatId = args.chatId || 'group:grp_d631733f2e13';
+        const action = args.action || (args.text ? 'send' : 'read');
+        if (action === 'read') {
+          const res = await botClient.listMessages(chatId, args.limit || 20);
+          return ok(res);
+        }
+        if (action === 'cancel') {
+          const res = await botClient.cancelTurn(chatId);
+          return ok(res);
+        }
+        if (action === 'resume_pending') {
+          const res = await botClient.resumePending(chatId);
+          return ok(res);
+        }
+        if (!args.text) return fail('action=send 时 text 不能为空');
+        const res = await botClient.sendMessage(chatId, args.text);
+        return ok(res);
+      }
+
+      case 'minimax_auto_resume': {
+        const { autoResume } = require('../gateway/resume');
+        const dryRun = args.dryRun !== false;
+        const limit = args.limit || 5;
+        const res = await autoResume({ dryRun, limit, sessionId: args.sessionId });
+        return ok(res);
+      }
+
       default:
         return fail(`未知工具: ${name}`);
     }
@@ -683,8 +771,27 @@ function dispatch(name, args = {}) {
  * 对外入口：先分发，再按风险级别决定要不要落审计。
  * 审计放在最外层，保证"调了但抛错"也留下记录——那种情况恰恰最需要回溯。
  */
-function callTool(name, args = {}) {
+async function callTool(name, args = {}, ctx = null) {
   const started = Date.now();
+
+  // 入参别名按工具精准归一化：抹平不同大模型（Claude/Gemini/GPT/开源模型）命名习惯差异，且不污染其他工具
+  if (args && typeof args === 'object') {
+    if (name === 'minimax_read_session') {
+      if (args.sessionId && !args.session) args.session = args.sessionId;
+    } else if (name === 'minimax_open_session' || name === 'minimax_get_result' || name === 'minimax_stop_generation') {
+      if (args.session && !args.sessionId) args.sessionId = args.session;
+    } else if (name === 'minimax_send_message') {
+      if (args.text && !args.message) args.message = args.text;
+      if (args.content && !args.message) args.message = args.content;
+    } else if (name === 'minimax_search') {
+      if (args.q && !args.query) args.query = args.q;
+      if (args.keyword && !args.query) args.query = args.keyword;
+    } else if (name === 'minimax_draft_answer' || name === 'minimax_answer_question') {
+      if (args.id && !args.requestId) args.requestId = args.id;
+    } else if (name === 'minimax_find_text' || name === 'minimax_click_text') {
+      if (args.query && !args.text) args.text = args.query;
+    }
+  }
 
   // 先用工具自己的 schema 挡一道。参数错就立刻报清楚，别让它变成 NaN 点歪坐标。
   const tool = TOOLS.find((t) => t.name === name);
@@ -698,7 +805,7 @@ function callTool(name, args = {}) {
 
   let result;
   try {
-    result = dispatch(name, args);
+    result = await dispatch(name, args, ctx);
   } catch (err) {
     if (ann.needsAudit(name)) {
       audit.record({

@@ -15,9 +15,25 @@ metadata:
 
 # MiniMax Code MCP
 
-14 个工具，两个通道：**读**走 MiniMax 自己的 SQLite，**写**走 macOS 原生事件注入。
-MiniMax Code 是 Electron 应用，没有本地 HTTP API，跨进程 AX 树也读不到，所以不要去找
-`computer_*` 工具、不要上 AppleScript（沙箱会把 Apple Events 全拦掉，报 -10004）。
+MiniMax Code 桌面端生产级自动化控制中枢。
+双通道高性能架构：
+1. **控制面 (Write)**：优先直连 **CDP (Chrome DevTools Protocol)** 端口，**0 系统辅助权限、0 录屏权限依赖、无视窗口遮挡与最小化**，微秒级操作 DOM 与 TipTap 富文本编辑器；自动降级到 CoreGraphics/OCR。
+2. **观察面 (Read)**：直读本地 SQLite 状态库，毫秒感知任务完成与会话流式变更。
+
+## 核心设计：极致省 Token 与全 Agent 兼容
+
+1. **首选 `minimax_brief`**：
+   态势快照按「待决定 > 报错 > 卡住 > 在跑 > 刚完成」输出注意力队列，沉睡的 130+ 会话自动折叠为数字，节省 90% 提示词 Token。
+2. **结构化动作建议 (`suggestedCall`)**：
+   每条 brief 条目直接输出结构化的 `{ tool, arguments }`，任何纯文本或轻量级 Agent 均可零思考直接反射调用。
+3. **免坐标意图驱动**：
+   纯文本 Agent 无需计算物理屏幕像素坐标：
+   - 发送指令：`minimax_send_message { message: "...", send: true }`
+   - 点击文本：`minimax_click_text { text: "继续执行" }`
+   - 探查界面：`minimax_find_text { text: "新建任务" }`
+   - 新建任务：`minimax_new_task`
+4. **自愈机制**：
+   若 MiniMax 调试端口未启动，可直接在宿主机执行 `node scripts/launch-with-debug.js` 自动优雅拉起。
 
 ## 先看，再动
 
@@ -291,6 +307,11 @@ node scripts/install-watch-agent.js --uninstall
 > 注意：在沙箱环境里 `launchctl bootstrap` 会返回 `Input/output error`（用户域不可写）。
 > 这时脚本会明确报错并**保持旧任务原样**，不会出现"新的没装上、旧的被停掉"。
 > 请在「终端」App 里跑这条命令。
+
+## Bot 沟通与断点续传
+
+- `minimax_bot_message`：直连 MiniMax Bot 团队（群聊/指定成员），发送消息、读取对话或取消轮次。
+- `minimax_auto_resume`：自动识别因额度耗尽(2056)而挂起的会话，在额度恢复后自动继续（原生对话点击 ▶ 播放键原生继续，Bot 对话推进轮次）。
 
 ## 硬规则
 

@@ -156,6 +156,7 @@ function brief(opts = {}) {
         why: `${q.agent || 'agent'} 在等你回答「${oneLine(q.question, 60)}」`,
         next: `minimax_draft_answer {requestId:"${q.requestId}"} 先看选项和一份建议，再决定要不要 minimax_answer_question`,
         requestId: q.requestId,
+        suggestedCall: { tool: 'minimax_draft_answer', arguments: { requestId: q.requestId } },
       });
       continue;
     }
@@ -167,7 +168,8 @@ function brief(opts = {}) {
         priority: 2,
         kind: 'error',
         why: `会话报错：${oneLine(s.error_message, 100) || '(没有错误信息)'}`,
-        next: '读末条消息看上下文：minimax_read_session {session:"<ID>", limit:3}；这是应用层错误，通常要用户处理（配额/授权）',
+        next: '读末条消息看上下文：minimax_read_session {session:"' + s.session_id + '", limit:3}',
+        suggestedCall: { tool: 'minimax_read_session', arguments: { session: s.session_id, limit: 3 } },
       });
       continue;
     }
@@ -179,7 +181,8 @@ function brief(opts = {}) {
         priority: 3,
         kind: 'stalled',
         why: `最后一条是你的指令，${humanAge(ageMin)}没人回`,
-        next: '确认是不是真的没在跑（可能是状态没落库）：minimax_read_session 看末尾，必要时 minimax_send_message 催一下',
+        next: '确认是否在跑：minimax_read_session {session:"' + s.session_id + '", limit:2}',
+        suggestedCall: { tool: 'minimax_read_session', arguments: { session: s.session_id, limit: 2 } },
       });
       continue;
     }
@@ -191,7 +194,8 @@ function brief(opts = {}) {
         priority: 4,
         kind: 'active',
         why: s.status === 'started' ? '状态是 started（这轮还没结束）' : `${humanAge(ageMin)}还有新消息`,
-        next: '要收结果用 minimax_get_result；不要重复发指令，会插进正在跑的这轮',
+        next: '获取最新产出：minimax_get_result {sessionId:"' + s.session_id + '"}',
+        suggestedCall: { tool: 'minimax_get_result', arguments: { sessionId: s.session_id } },
       });
       continue;
     }
@@ -203,7 +207,8 @@ function brief(opts = {}) {
         priority: 5,
         kind: 'finished',
         why: `${humanAge(ageMin)}刚收工`,
-        next: '读结论：minimax_read_session {session:"<ID>", limit:2}',
+        next: '读结论：minimax_read_session {session:"' + s.session_id + '", limit:2}',
+        suggestedCall: { tool: 'minimax_read_session', arguments: { session: s.session_id, limit: 2 } },
       });
     }
     // 其余（安静的旧会话）不输出——这正是 brief 的意义

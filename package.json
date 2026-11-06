@@ -1,9 +1,16 @@
 {
   "name": "minimax-mcp",
   "version": "0.1.0",
-  "private": true,
-  "description": "Local-first stdio MCP server and Agent Skill that lets AI agents read and operate MiniMax Code on the user's Mac.",
+  "description": "Local-first stdio MCP server and Agent Skill that lets AI agents read and operate MiniMax Code on macOS.",
   "homepage": "https://github.com/Luckycat133/minimax-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Luckycat133/minimax-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Luckycat133/minimax-mcp/issues"
+  },
+  "author": "Luckycat133",
   "license": "MIT",
   "engines": {
     "node": ">=22"
@@ -25,7 +32,7 @@
   "scripts": {
     "start": "node mcp-server.js",
     "doctor": "node scripts/doctor.js",
-    "test": "node tests/contract.test.js && node tests/policy.test.js && node tests/questionnaire.test.js && node tests/ocr-match.test.js && node tests/edge.test.js && node tests/smoke.test.js",
+    "test": "node tests/contract.test.js && node tests/policy.test.js && node tests/questionnaire.test.js && node tests/ocr-match.test.js && node tests/edge.test.js && node tests/smoke.test.js && node tests/cdp.test.js",
     "pack:npm": "node scripts/build-npm-package.js",
     "pack:mcpb": "node scripts/build-mcpb.js",
     "test:contract": "node tests/contract.test.js",

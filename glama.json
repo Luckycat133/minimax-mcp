@@ -13,7 +13,7 @@
   "transport": [
     "stdio"
   ],
-  "tools": 25,
+  "tools": 27,
   "keywords": [
     "minimax",
     "minimax-code",

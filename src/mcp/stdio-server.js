@@ -70,7 +70,24 @@ function startTaskPoller() {
   timer.unref();
 }
 
-function handle(message) {
+/**
+ * 正在执行的请求，用于支持 notifications/cancelled。
+ * key 是 JSON-RPC 的 id，值是 {cancelled:boolean}。
+ */
+const inflight = new Map();
+
+function cancelFlag(id) {
+  if (id === undefined || id === null) return null;
+  if (!inflight.has(id)) inflight.set(id, { cancelled: false });
+  return inflight.get(id);
+}
+
+const CTX = {
+  emit,
+  shouldStop: () => false, // 由下面按请求覆盖
+};
+
+async function handle(message, ctx = CTX) {
   const { id, method, params } = message;
 
   if (method === 'initialize') {
@@ -113,8 +130,23 @@ function handle(message) {
     if (!known) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: `未知工具: ${name}` } };
     }
-    const result = callTool(name, params?.arguments || {});
-    return { jsonrpc: '2.0', id, result };
+    // 登记在飞请求，这样 notifications/cancelled 能按 id 把它掐掉
+    const flag = cancelFlag(id);
+    const reqCtx = { ...ctx, shouldStop: () => Boolean(flag && flag.cancelled) };
+    try {
+      const result = await callTool(name, params?.arguments || {}, reqCtx);
+      return { jsonrpc: '2.0', id, result };
+    } finally {
+      if (id !== undefined && id !== null) inflight.delete(id);
+    }
+  }
+
+  // 客户端取消一个在飞的请求。目前只有 get_result 这种长等待会响应取消。
+  if (method === 'notifications/cancelled') {
+    const target = params?.requestId;
+    const flag = inflight.get(target);
+    if (flag) flag.cancelled = true;
+    return null;
   }
 
   // ---- Tasks 扩展 ----
@@ -157,6 +189,8 @@ function handle(message) {
 function startStdioServer() {
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
+  // 每条消息独立处理，不排队——否则一个 get_result 等 300 秒，期间连取消通知都收不到。
+  // JSON-RPC 允许响应乱序（靠 id 对应），所以并发是安全的。
   rl.on('line', (line) => {
     const text = line.trim();
     if (!text) return;
@@ -169,8 +203,15 @@ function startStdioServer() {
     }
     const batch = Array.isArray(message) ? message : [message];
     for (const m of batch) {
-      const res = handle(m);
-      if (res) process.stdout.write(`${JSON.stringify(res)}\n`);
+      Promise.resolve()
+        .then(() => handle(m))
+        .then((res) => {
+          if (res) process.stdout.write(`${JSON.stringify(res)}\n`);
+        })
+        .catch((err) => {
+          const id = m && m.id !== undefined ? m.id : null;
+          process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32603, message: String(err && err.message || err) } })}\n`);
+        });
     }
   });
 
@@ -179,4 +220,4 @@ function startStdioServer() {
   process.on('SIGTERM', () => process.exit(0));
 }
 
-module.exports = { startStdioServer, handle, negotiateProtocol, emit };
+module.exports = { startStdioServer, handle, negotiateProtocol, emit, inflight };

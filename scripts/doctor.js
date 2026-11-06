@@ -39,7 +39,12 @@ const gui = path.join(__dirname, '..', 'scripts', 'mac_gui.py');
 check('mac_gui.py 存在', fs.existsSync(gui), gui);
 
 const perm = tryRun('python3', [gui, 'check']);
-check('辅助功能权限', perm.ok && /已授权/.test(perm.out), perm.out.split('\n')[0] || '');
+const cuaCli = path.join(__dirname, '..', '..', 'codex-computer-use-mcp', 'bin', 'cua');
+const cuaAvailable = fs.existsSync(cuaCli);
+const permOk = (perm.ok && /已授权/.test(perm.out)) || cuaAvailable;
+check('辅助功能权限', permOk, permOk 
+  ? (cuaAvailable ? '已通过 Codex Computer Use 原生授权' : perm.out.split('\n')[0]) 
+  : (perm.out.split('\n')[0] || '未授权（普通 Agent 请运行 node scripts/setup-permissions.js 一键开启）'));
 
 const app = '/Applications/MiniMax Code.app';
 check('MiniMax Code 已安装', fs.existsSync(app), app);

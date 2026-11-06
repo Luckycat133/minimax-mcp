@@ -261,6 +261,29 @@
       },
       "output": "events[], count, total",
       "sideEffects": "none（纯读文件）"
+    },
+    {
+      "name": "minimax_bot_message",
+      "intent": "与 MiniMax Bot 团队沟通：向指定群聊或 Bot 发送指令，或读取团队最新对话",
+      "input": {
+        "chatId": "string, 默认 group:grp_d631733f2e13",
+        "text": "string, 消息内容",
+        "limit": "integer, 默认 20",
+        "action": "send|read|cancel|resume_pending, 默认 send"
+      },
+      "output": "message | messages[] | {ok: true}",
+      "sideEffects": "action=send 会向 Bot 或群聊发送消息"
+    },
+    {
+      "name": "minimax_auto_resume",
+      "intent": "智能断点续传：自动识别因额度耗尽(2056)而挂起的会话，在额度恢复后自动继续",
+      "input": {
+        "dryRun": "boolean, 默认 true",
+        "limit": "integer, 默认 5",
+        "sessionId": "string, 可选"
+      },
+      "output": "ok, dryRun, quotaAvailable, quotaStatus, resumedCount, results[]",
+      "sideEffects": "dryRun=false 时通过 CDP 点击播放键或触发 Bot 轮次恢复"
     }
   ]
 }

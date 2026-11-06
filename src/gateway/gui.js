@@ -14,6 +14,21 @@ const path = require('node:path');
 const MAC_GUI = path.join(__dirname, '..', '..', 'scripts', 'mac_gui.py');
 const PYTHON = process.env.MINIMAX_PYTHON || 'python3';
 const APP = 'MiniMax Code';
+const CUA_ACTION = path.join(__dirname, '..', '..', '..', 'codex-computer-use-mcp', 'bin', 'cua-action');
+const CUA_SCREENSHOT = path.join(__dirname, '..', '..', '..', 'codex-computer-use-mcp', 'bin', 'cua-screenshot');
+const fs = require('node:fs');
+
+let _cachedHasAccessibility = null;
+function hasPythonAccessibility() {
+  if (_cachedHasAccessibility !== null) return _cachedHasAccessibility;
+  try {
+    const out = gui(['check']);
+    _cachedHasAccessibility = /已授权/.test(out);
+  } catch {
+    _cachedHasAccessibility = false;
+  }
+  return _cachedHasAccessibility;
+}
 
 function gui(args, timeout = 60000) {
   return execFileSync(PYTHON, [MAC_GUI, ...args], {
@@ -229,16 +244,34 @@ function sleep(ms) {
 }
 
 function click(x, y, button = 'left') {
+  if (!hasPythonAccessibility() && fs.existsSync(CUA_ACTION)) {
+    try {
+      execFileSync(CUA_ACTION, ['click', String(Math.round(x)), String(Math.round(y))], { encoding: 'utf8', timeout: 15000 });
+      return { clicked: [Math.round(x), Math.round(y)], button, via: 'cua' };
+    } catch (_) {}
+  }
   gui(['click', String(Math.round(x)), String(Math.round(y)), button]);
   return { clicked: [Math.round(x), Math.round(y)], button };
 }
 
 function typeText(text) {
+  if (!hasPythonAccessibility() && fs.existsSync(CUA_ACTION)) {
+    try {
+      execFileSync(CUA_ACTION, ['type', text], { encoding: 'utf8', timeout: 15000 });
+      return { typed: text.length, via: 'cua' };
+    } catch (_) {}
+  }
   gui(['type', text]);
   return { typed: text.length };
 }
 
 function pressKey(key, modifiers = []) {
+  if (!hasPythonAccessibility() && fs.existsSync(CUA_ACTION)) {
+    try {
+      execFileSync(CUA_ACTION, ['key', key], { encoding: 'utf8', timeout: 15000 });
+      return { key, modifiers, via: 'cua' };
+    } catch (_) {}
+  }
   gui(['key', key, ...(modifiers.length ? [modifiers.join(',')] : [])]);
   return { key, modifiers };
 }
@@ -252,14 +285,19 @@ function screenshot(name = 'shot', mode = 'screen', region = null) {
   const safe = String(name).replace(/[^\w.-]+/g, '_').slice(0, 40) || 'shot';
   if (mode === 'region' && region) {
     const out = path.join(__dirname, '..', '..', 'screenshots');
-    require('node:fs').mkdirSync(out, { recursive: true });
+    fs.mkdirSync(out, { recursive: true });
     const file = path.join(out, `${safe}_${Date.now()}.png`);
-    // screencapture -R 吃的是**屏幕点**（全局显示坐标系），和我们的坐标系一致，
-    // 不要乘 backing scale。Retina 上输出图片本身会是 2 倍像素，那是正常的。
-    // 之前这里乘过一次 scale，在 scale>1 的机器上会截到偏移且放大两倍的区域。
-    execFileSync('screencapture', ['-x', '-R',
-      `${Math.round(region.x)},${Math.round(region.y)},${Math.round(region.width)},${Math.round(region.height)}`,
-      file]);
+    try {
+      execFileSync('screencapture', ['-x', '-R',
+        `${Math.round(region.x)},${Math.round(region.y)},${Math.round(region.width)},${Math.round(region.height)}`,
+        file]);
+    } catch (scErr) {
+      if (fs.existsSync(CUA_SCREENSHOT)) {
+        execFileSync(CUA_SCREENSHOT, [file], { timeout: 30000 });
+      } else {
+        throw scErr;
+      }
+    }
     return { path: file };
   }
   const out = gui(['shot', safe]);

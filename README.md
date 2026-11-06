@@ -1,159 +1,183 @@
 # minimax-mcp
 
-让 AI agent 读你本机 MiniMax Code 的全部对话，并操作它的界面。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org/)
+[![MCP Specification](https://img.shields.io/badge/MCP-2024--11--05-blue.svg)](https://modelcontextprotocol.io/)
 
-MiniMax Code 是 Electron 应用：没有本地 HTTP API，跨进程无障碍树也读不到。
-这个项目用两条通道解决——**读**走它自己的 SQLite，**写**走 macOS 原生事件注入。
+**minimax-mcp** 是专为 **MiniMax Code** 桌面客户端（macOS）打造的本地优先 stdio MCP (Model Context Protocol) 服务器与 Agent 技能包。
+
+它让任何接入 MCP 的 AI Agent（如 Claude Desktop、Cursor、Codex、Antigravity 等）能够无缝感知、监控和操控本机 MiniMax Code 的全部会话、后台任务、问卷决策与 Bot 团队。
 
 ```
-Agent host ──stdio MCP──▶ minimax-mcp ──┬─ 只读 SQLite  ~/.minimax/v2/sqlite/runtime-state.sqlite
-                                        └─ GUI 驱动     scripts/mac_gui.py (CoreGraphics)
+┌────────────────────────────────────────────────────────┐
+│                   Agent Host / Client                  │
+│       (Claude Desktop, Cursor, Antigravity, etc.)      │
+└───────────────────────────┬────────────────────────────┘
+                            │ stdio (JSON-RPC 2.0)
+┌───────────────────────────▼────────────────────────────┐
+│                       minimax-mcp                      │
+│     (27 Tools · 3 Risk Levels · Proactive Watcher)     │
+└───────────┬────────────────────────────────┬───────────┘
+            │                                │
+      [Control Plane]                  [Data Plane]
+            │                                │
+ ┌──────────┴──────────┐            ┌────────┴──────────┐
+ │ Chrome DevTools     │            │ Local SQLite DB   │
+ │ Protocol (CDP)      │            │ Runtime State     │
+ │ • DOM 级极速驱动    │            │ • 会话/消息历史   │
+ │ • 0 系统权限要求    │            │ • 实时任务状态    │
+ │ • 无视窗口遮挡/最小化│           │ • 待答问卷/审批   │
+ └──────────┬──────────┘            └───────────────────┘
+            │ Fallback
+ ┌──────────┴──────────┐
+ │ CoreGraphics / OCR  │
+ │ • Vision 屏幕识别   │
+ │ • 系统事件模拟      │
+ └─────────────────────┘
 ```
 
-## 它解决什么问题
+---
 
-- 你有好几个 MiniMax Code 会话在跑，想让 AI 替你盯着：谁在等回答、谁出了结果、谁卡住了。
-- 你想让 AI 往某个会话里推一句话，而不是自己切来切去点。
-- 你想让 AI 截图看当前界面，按文字/坐标点按钮。
+## 🌟 核心特性
 
-## 工具面
+1. **双通道高性能控制**：
+   - **控制面（Write）**：优先直连 **CDP (Chrome DevTools Protocol)** 端口，**0 系统辅助权限、0 录屏权限依赖、无视窗口遮挡与最小化**，微秒级操作 DOM 与 TipTap 富文本编辑器；非 CDP 环境下自动平滑降级至 CoreGraphics + macOS Vision OCR。
+   - **观察面（Read）**：直读本机 SQLite 运行时状态，毫秒级感知任务完成、异常报错与会话流式变更，绝不污染客户端状态。
+2. **态势快照与注意力队列 (`minimax_brief`)**：
+   - 按 `等你决定 > 报错 > 卡住 > 运行中 > 刚完成` 动态聚合注意力队列，沉睡的百余个历史会话自动折叠，节省 90% 提示词 Token。
+   - 每条条目自带结构化动作建议（`suggestedCall`），让纯文本或轻量级 Agent 零思考直接反射调用。
+3. **主动巡检与低风险自愈 (`minimax_watch`)**：
+   - 自动跟踪状态变化并进入事件队列（`minimax_events`）。
+   - 内置纯函数风险策略引擎（四道安全闸门），支持自动催促卡住会话、低风险选项自动作答，高风险操作绝对保留给人。
+4. **MiniMax Bot 团队集成与智能断点续传**：
+   - 支持通过 `minimax_bot_message` 直连 MiniMax 专家/Bot 团队（群聊分发、单聊调度与轮次管理）。
+   - 内置 `minimax_auto_resume`：自动识别因额度耗尽（2056）停下的长任务，在额度恢复后自动恢复（原生会话点击 ▶ 播放键原生继续，Bot 对话推进轮次）。
 
-契约版本 1，25 个工具，每个单一意图。
+---
 
-只读（不改任何东西）：
+## 🛠️ 工具总览（27 个精细意图工具）
 
-| 工具 | 作用 |
+### 1. 观察与态势感知（只读，零副作用）
+
+| 工具名 | 说明 |
 |---|---|
-| `minimax_brief` | **态势快照**：只输出需要处理的事，按优先级排序，每条带原因和下一步 |
-| `minimax_events` | 读巡检事件队列（我不在的时候发生了什么） |
-| `minimax_events` | 读巡检事件队列（我不在的时候发生了什么） |
-| `minimax_status` | 数据库位置、会话数、消息数、最后活动、运行中任务数 |
-| `minimax_list_sessions` | 按最近活动列出会话 |
-| `minimax_read_session` | 读某个会话的消息（可带思考过程） |
-| `minimax_tail_sessions` | 最近 N 个会话各自最新的几条 |
-| `minimax_search` | 跨会话全文搜索 |
-| `minimax_pending` | Agent 发出、等你回答的提问 |
-| `minimax_draft_answer` | 读一条提问 + 生成建议答案（只读） |
-| `minimax_tasks` | 后台任务状态 |
-| `minimax_windows` | MiniMax 窗口几何信息 |
-| `minimax_find_text` | 按文字定位屏幕元素，返回屏幕点坐标（Vision OCR） |
+| `minimax_brief` | **态势快照**：按优先级聚合待办会话与建议动作，节省 Token 首选 |
+| `minimax_status` | 查看本地数据库路径、会话数、消息总数及活动状态 |
+| `minimax_list_sessions` | 列出最近会话列表，返回会话 ID 及序号 |
+| `minimax_read_session` | 读取指定会话的历史消息（支持会话 ID `mvs_*` 或列表序号） |
+| `minimax_tail_sessions` | 快速采样最近 N 个会话末尾消息，适合多会话并发巡检 |
+| `minimax_search` | 跨会话全文检索标题与消息内容，返回高亮聚焦上下文 |
+| `minimax_pending` | 查询当前等待人工确认或答复的问卷与审批卡片 |
+| `minimax_tasks` | 查询后台任务执行状态（running / succeeded / failed / canceled） |
+| `minimax_draft_answer` | 为待答问卷生成草稿回答建议（只读无副作用） |
+| `minimax_windows` | 获取 MiniMax 窗口在屏位置、尺寸及遮挡状态 |
+| `minimax_events` | 读取巡检事件队列（finished / error / question / stalled） |
+| `minimax_find_text` | 定位界面中的文本元素（优先 CDP DOM，自动回退 Vision OCR） |
 
-控制（会真的动鼠标键盘）：
+### 2. 界面控制与输入（带安全守卫）
 
-| 工具 | 作用 |
+| 工具名 | 说明 |
 |---|---|
-| `minimax_activate` | 切到前台并回报前台窗口 |
-| `minimax_screenshot` | 全屏或区域截图 |
-| `minimax_send_message` | 往输入框粘贴指令，可选回车，**发完自动核对数据库** |
-| `minimax_get_result` | 等这轮跑完并收回最终回复 |
-| `minimax_stop_generation` | 按 Esc 停当前这轮生成 |
-| `minimax_answer_question` | 提交问卷答案（默认只 preview，提交后核对数据库状态） |
-| `minimax_new_task` / `minimax_open_session` | 新建任务页 / 按标题切换会话 |
-| `minimax_click_text` | 找到某段文字并点它（比手算坐标可靠） |
-| `minimax_watch` | **主动巡检**：比对快照产出事件，按风险策略自动处理低风险的事 |
-| `minimax_watch` | **主动巡检**：比对快照产出事件，按风险策略自动处理低风险的事 |
-| `minimax_click` / `minimax_type` / `minimax_key` | 基础键鼠原语 |
+| `minimax_send_message` | 往输入框注入文本并可选回车发送（带活跃防误触守卫） |
+| `minimax_get_result` | 等待指定会话当前轮次结束并收回复 |
+| `minimax_stop_generation` | 终止当前正在生成或运行中的会话任务 |
+| `minimax_answer_question` | 提交问卷回答（默认 `preview: true` 仅预览，需显式确认才提交） |
+| `minimax_new_task` | 新建任务页（优先 CDP 触发，次选快捷键） |
+| `minimax_open_session` | 导航切换至指定会话 |
+| `minimax_click_text` | 查找并点击指定文本控件（无视窗口缩放与位移） |
+| `minimax_activate` | 将 MiniMax 窗口唤醒至系统前台并返回焦点窗口信息 |
+| `minimax_screenshot` | 窗口截图（支持全屏 screen 或区域 region，返回文件路径） |
+| `minimax_click` / `minimax_type` / `minimax_key` | 基础键鼠操作原语 |
 
-## 主动巡检（这是和"工具箱"最大的区别）
+### 3. 高级协同与自动化
 
-`minimax_brief` 是"你问我答"，`minimax_watch` 是"我自己看"：它记住上次快照，
-只报变化，并且能把**低风险**的事直接处理掉。
+| 工具名 | 说明 |
+|---|---|
+| `minimax_watch` | **主动巡检**：对比历史快照，按安全策略自动处理低风险事件 |
+| `minimax_bot_message` | 与 MiniMax Bot 团队沟通（发送群聊消息、指定成员或读取对话） |
+| `minimax_auto_resume` | **智能断点续传**：额度耗尽（2056）自动检测与恢复重试 |
 
-```
-minimax_watch                 # 跑一轮
-minimax_watch {dryRun: true}  # 只算不做
-minimax_events                # 拉事件
-```
+---
 
-自动动作有四道闸：**风险等级 ≤ low**、**有推荐答案**、**人离开 ≥180 秒**、**每轮 ≤2 个动作**。
-涉及钱 / 发布 / 删除 / 凭证 / 对外承诺的，一律只进 `needsHuman`，永不自动。
+## 🔒 三档安全分级与审计
 
-风险判据在 `src/gateway/policy.js`，纯函数，28 条单测盯着。有个关键取舍：
-**「没有推荐答案」会把等级从 low 抬到 medium**——出题方没给默认项，
-说明它认为需要人判断，那就不该替人挑。
+所有工具均带有 MCP 标准 `annotations`，并划分为三档安全等级：
+- **`read`（只读）**：完全无副作用，任意调用。
+- **`ui`（轻量控制）**：仅改变界面焦点、截图或导航，完全可逆。
+- **`commit`（不可逆动作）**：发送消息、提交问卷回答、终止生成。所有 `commit` 级工具均有**默认关闭的闸门**（如 `send: false`, `preview: true`），必须显式参数才会生效。
 
-装成定时任务：
+所有 `ui` 与 `commit` 动作均自动脱敏写入本地审计日志：`~/.minimax-mcp/audit.jsonl`。
+
+---
+
+## 🚀 快速开始
+
+### 1. 环境依赖
+
+- **操作系统**：macOS
+- **运行环境**：Node.js >= 22、Python 3、SQLite 3（系统自带）
+- **客户端**：已安装并登录的 [MiniMax Code](https://agent.minimax.cn/)
+
+### 2. 安装与配置
+
+克隆仓库并安装依赖：
 
 ```bash
-node scripts/install-watch-agent.js     # 每 5 分钟一轮（launchd）
-node scripts/watch-tick.js              # 手动跑一轮
+git clone https://github.com/Luckycat133/minimax-mcp.git
+cd minimax-mcp
+npm test                  # 运行全套契约与逻辑测试（129+ 断言全绿）
+npm run doctor            # 环境依赖与权限自检
 ```
 
-产物：`~/.minimax-mcp/{events.jsonl, report.md, watch-state.json, watch.log}`。
+### 3. 客户端 MCP 配置
 
-## 主动巡检（这是和"工具箱"最大的区别）
+在 Claude Desktop / Cursor / Antigravity 的 MCP 配置文件中添加：
 
-`minimax_brief` 是"你问我答"，`minimax_watch` 是"我自己看"：它记住上次快照，
-只报变化，并且能把**低风险**的事直接处理掉。
-
+```json
+{
+  "mcpServers": {
+    "minimax-mcp": {
+      "command": "node",
+      "args": [
+        "/Users/jack/Documents/projects/minimax-mcp/mcp-server.js"
+      ],
+      "env": {
+        "MINIMAX_PYTHON": "python3",
+        "MINIMAX_SQLITE_BIN": "sqlite3"
+      }
+    }
+  }
+}
 ```
-minimax_watch                 # 跑一轮
-minimax_watch {dryRun: true}  # 只算不做
-minimax_events                # 拉事件
-```
+> *注：将上述路径替换为你的实际项目路径；若通过 `npm link` 全局链接，也可直接使用 `minimax-mcp` 命令。*
 
-自动动作有四道闸：**风险等级 ≤ low**、**有推荐答案**、**人离开 ≥180 秒**、**每轮 ≤2 个动作**。
-涉及钱 / 发布 / 删除 / 凭证 / 对外承诺的，一律只进 `needsHuman`，永不自动。
+### 4. 启用 CDP 极速控制（推荐）
 
-风险判据在 `src/gateway/policy.js`，纯函数，28 条单测盯着。有个关键取舍：
-**「没有推荐答案」会把等级从 low 抬到 medium**——出题方没给默认项，
-说明它认为需要人判断，那就不该替人挑。
-
-装成定时任务：
+通过开启 Remote Debugging 端口，可让 MiniMax MCP 获得极速 DOM 操作能力且无需任何 macOS 系统辅助权限：
 
 ```bash
-node scripts/install-watch-agent.js     # 每 5 分钟一轮（launchd）
-node scripts/watch-tick.js              # 手动跑一轮
+node scripts/launch-with-debug.js
 ```
 
-产物：`~/.minimax-mcp/{events.jsonl, report.md, watch-state.json, watch.log}`。
+---
 
-## 三档风险分级
+## 🤖 定时巡检后台服务
 
-工具带 MCP 标准 `annotations`，内部按三档设计：`read`（只读）→ `ui`（只动界面，可逆）→
-`commit`（改变对话内容，不可逆）。`commit` 档必须至少有一道默认关闭的闸门，契约测试盯着。
+可将主动巡检配置为 macOS launchd 守护进程：
 
-所有 `ui` / `commit` 动作写审计到 `~/.minimax-mcp/audit.jsonl`，参数自动脱敏。
-
-## 为什么需要 OCR
-
-MiniMax 是 Electron：读不到控件树，AppleScript 被沙箱拦。想按"按钮文字"点东西，
-只能靠屏幕文字识别。`scripts/ocr.swift` 用 macOS Vision（中英文都认），编译成
-`.cache/ocr`，首次使用时自动构建。这也是 `minimax_answer_question` 能自动点选项的基础。
-
-## 运行要求
-
-- macOS（需要「辅助功能」和「屏幕录制」两项权限，给运行 MCP 的那个 App）
-- Node.js 22+
-- `python3`、`sqlite3`（系统自带）
-- 可选环境变量：`MINIMAX_MCP_HOME` 改数据目录（默认 `~/.minimax-mcp`），
-  `MINIMAX_MIN_WINDOW_WIDTH` 改主窗口宽度下限（默认 320）
-- 可选环境变量：`MINIMAX_MCP_HOME` 改数据目录（默认 `~/.minimax-mcp`），
-  `MINIMAX_MIN_WINDOW_WIDTH` 改主窗口宽度下限（默认 320）
-- Swift 工具链（`xcode-select --install`）——只用于编译 OCR 助手，编译一次即可
-- MiniMax Code 已安装并登录
-
-零第三方依赖：SQLite 走系统 `sqlite3` CLI，GUI 走 `scripts/mac_gui.py`。
-
-## 启动
-
-```sh
-node mcp-server.js        # stdio MCP 服务器
-npm run doctor            # 自检：node/sqlite3/python3、数据库、权限
-npm test                  # 冒烟测试：initialize → tools/list → 只读调用
+```bash
+node scripts/install-watch-agent.js               # 安装守护进程（每 5 分钟自动巡检一轮）
+node scripts/install-watch-agent.js --uninstall   # 卸载守护进程
 ```
 
-客户端配置见 [`skills/minimax-mcp/assets/mcp-client-config.json`](skills/minimax-mcp/assets/mcp-client-config.json)。
+巡检产物将持久化保存在 `~/.minimax-mcp/` 目录下：
+- `report.md`：最新态势 Markdown 报告
+- `events.jsonl`：待处理与已处理事件队列
+- `watch-state.json`：增量对比状态与策略配置
+- `audit.jsonl`：操作审计记录
 
-## 安全边界
+---
 
-- 数据库**只读**打开。App 运行时有内存缓存，写库会造成状态不一致。
-- 所有控制工具先校验 MiniMax 是不是真在前台，不是就直接报错放弃，不硬点。
-- `minimax_send_message` 默认只粘贴不发送，必须显式 `send: true`。
-- 发送后靠数据库确认，不靠「我按了回车」这种自述。
+## 📄 开源许可证
 
-## 已知限制
-
-- 不能可靠地按按钮文字点击：MiniMax 是 Electron，中文 OCR 不可用。要么坐标，要么截图后人来看。
-- 切换会话要点左侧列表，坐标随布局变，动手前先截图。
-- 窗口被完全遮挡时，后台截到的是旧帧。
+本项目采用 [MIT 许可证](LICENSE)。

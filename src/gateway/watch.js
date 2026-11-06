@@ -255,7 +255,7 @@ function pruneEmitted(emitted, now) {
  *
  * 返回 {at, idleSeconds, events, actions, needsHuman, counts}
  */
-function tick(opts = {}) {
+async function tick(opts = {}) {
   const policy = effectivePolicy(opts.policy);
   const execute = opts.execute || (() => ({ skipped: true, reason: '没有注入执行器' }));
   const dryRun = opts.dryRun === true;
@@ -371,7 +371,7 @@ function tick(opts = {}) {
         actions.push({ tool: 'minimax_answer_question', args: { requestId: q.requestId }, planned: true, why: decision.why });
         continue;
       }
-      const res = execute('minimax_answer_question', {
+      const res = await execute('minimax_answer_question', {
         requestId: q.requestId,
         preview: false,
         force: true,
@@ -445,7 +445,7 @@ function tick(opts = {}) {
       actions.push({ tool: 'minimax_send_message', args: { sessionId: item.sessionId }, planned: true, why: decision.why });
       continue;
     }
-    const res = execute('minimax_send_message', {
+    const res = await execute('minimax_send_message', {
       message: policy.autoNudge.message,
       send: true,
       force: true,

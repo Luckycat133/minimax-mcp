@@ -49,6 +49,8 @@ const LEVEL = {
   // 会改变对话内容：发出去、提交上去，都不是点一下能恢复的
   minimax_send_message: 'commit',
   minimax_answer_question: 'commit',
+  minimax_bot_message: 'commit',
+  minimax_auto_resume: 'commit',
 
   // watch 会代答/代催，所以按 commit 处理。它能不能动，由策略决定（见 GATES）
   minimax_watch: 'commit',
@@ -62,6 +64,8 @@ const GATES = {
   minimax_send_message: 'send 默认 false；另有活跃守卫，最近 300s 内有会话活动就拒绝',
   minimax_answer_question: 'preview 默认 true；真提交要 preview:false + force:true',
   minimax_watch: 'mode 默认 act 但只动低风险：仅当风险=low 且有推荐答案、人离开 ≥minIdleSeconds、每轮最多 maxActionsPerTick 个动作',
+  minimax_bot_message: 'action=read 时只读；action=send 会向 Bot 或群聊发送消息',
+  minimax_auto_resume: 'dryRun 默认 true；只有显式 dryRun:false 才会触发恢复操作',
 };
 
 /** 幂等：重复调用结果一样，宿主可以安全重试。 */

@@ -4,3 +4,8 @@ screenshots/
 .DS_Store
 .cache/
 dist/
+*.sqlite
+*.sqlite3
+.env
+.env.*
+

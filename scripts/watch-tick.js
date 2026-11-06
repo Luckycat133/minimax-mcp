@@ -28,21 +28,40 @@ if (process.env.MINIMAX_WATCH_RISK_CEILING) policy.riskCeiling = process.env.MIN
 if (process.env.MINIMAX_WATCH_MIN_IDLE) policy.minIdleSeconds = Number(process.env.MINIMAX_WATCH_MIN_IDLE);
 if (process.env.MINIMAX_WATCH_MAX_ACTIONS) policy.maxActionsPerTick = Number(process.env.MINIMAX_WATCH_MAX_ACTIONS);
 
-function main() {
-  const res = callTool('minimax_watch', { action: 'tick', dryRun, policy });
+async function main() {
+  const res = await callTool('minimax_watch', { action: 'tick', dryRun, policy });
   if (res.isError) {
     console.error(res.content[0].text);
     process.exit(1);
   }
   const r = JSON.parse(res.content[0].text);
-  const total = r.events.length + r.actions.length + r.needsHuman.length;
+
+  // 自动断点续传：若额度可用，自动识别并恢复因额度中断的会话
+  let resumeRes = null;
+  try {
+    const resumeCall = await callTool('minimax_auto_resume', { dryRun, limit: 3 });
+    if (!resumeCall.isError) {
+      resumeRes = JSON.parse(resumeCall.content[0].text);
+    }
+  } catch {}
+
+  const resumedCount = resumeRes?.resumedCount || 0;
+  const total = r.events.length + r.actions.length + r.needsHuman.length + resumedCount;
 
   if (quiet && total === 0) return;
 
-  console.log(`[${r.at}] 闲置 ${r.idleSeconds ?? '?'}s | 事件 ${r.events.length} | 动作 ${r.actions.length} | 待处理 ${r.needsHuman.length}`);
+  console.log(`[${r.at}] 闲置 ${r.idleSeconds ?? '?'}s | 事件 ${r.events.length} | 动作 ${r.actions.length} | 待处理 ${r.needsHuman.length} | 断点续传 ${resumedCount}`);
   for (const e of r.events) console.log(`  · ${e.type.padEnd(11)} ${String(e.title || '').slice(0, 40)} — ${String(e.detail || '').slice(0, 80)}`);
   for (const a of r.actions) console.log(`  > ${a.tool} ${a.planned ? '(计划)' : a.ok ? '✓' : '✗'} ${a.why || ''}`);
+  if (resumeRes?.results?.length) {
+    for (const s of resumeRes.results) {
+      console.log(`  ↻ 续传 [${s.type}] ${s.sessionId} (${s.title}): ${s.action} ${s.ok ? '✓' : s.skipped ? '↷' : '✗'}`);
+    }
+  }
   for (const n of r.needsHuman) console.log(`  ! 需要人：${n.title || n.sessionId} — ${n.why || n.reason}`);
 }
 
-main();
+main().catch((err) => {
+  console.error(String(err && err.stack || err));
+  process.exit(1);
+});

@@ -192,17 +192,19 @@ function main() {
       const win = gui.mainWindow();
       const region = win ? { x: win.x, y: win.y, width: win.width, height: win.height } : null;
       const shot = ocr.read(region);
-      const sample = (shot.items || []).find((it) => it.text && it.text.trim().length >= 2);
+      const sample = (shot.items || []).find((it) => (it.conf || 0) >= 0.7 && it.text && /^[a-zA-Z0-9\u4e00-\u9fa5]{2,10}$/.test(it.text.trim()))
+        || (shot.items || []).find((it) => it.text && it.text.trim().length >= 2);
       if (!sample) {
         ftDetail = '窗口里没扫到任何文字（可能被遮挡）';
       } else {
+        const queryText = sample.text.trim().replace(/^[^a-zA-Z0-9\u4e00-\u9fa5]+/, '').slice(0, 8);
         const back = await send('tools/call', {
           name: 'minimax_find_text',
-          arguments: { text: sample.text.trim(), refresh: true },
+          arguments: { text: queryText || sample.text.trim(), region, refresh: true },
         });
         const parsed = JSON.parse(back.result.content[0].text);
         ftOk = parsed.total >= 1 && typeof parsed.picked?.cx === 'number';
-        ftDetail = `反查「${sample.text.trim().slice(0, 12)}」命中 ${parsed.total} 个`;
+        ftDetail = `反查「${queryText || sample.text.trim()}」命中 ${parsed.total} 个`;
       }
     } catch (err) {
       ftDetail = String(err.message).slice(0, 100);
@@ -236,14 +238,14 @@ function main() {
 
     // 审计：动界面的工具必须留下记录，只读工具不该留
     const audit = require(path.join(__dirname, '..', 'src/gateway/audit'));
-    const beforeCount = audit.recent(1000).length;
+    const beforeCount = audit.recent(100000).length;
     await send('tools/call', { name: 'minimax_screenshot', arguments: { name: 'audit_probe', mode: 'region', x: 0, y: 0, width: 20, height: 20 } });
-    const afterUi = audit.recent(1000).length;
+    const afterUi = audit.recent(100000).length;
     record('动界面会写审计', afterUi > beforeCount, `${beforeCount} → ${afterUi}`);
 
-    const beforeRead = audit.recent(1000).length;
+    const beforeRead = audit.recent(100000).length;
     await send('tools/call', { name: 'minimax_status', arguments: {} });
-    const afterRead = audit.recent(1000).length;
+    const afterRead = audit.recent(100000).length;
     record('只读不写审计', afterRead === beforeRead, `${beforeRead} → ${afterRead}`);
 
     // watch：status 与 dryRun tick 都必须是只读的、结构完整的

@@ -111,9 +111,24 @@ const sleep = (ms) => {
   while (Date.now() < end) { /* 同步等待 */ }
 };
 
-const clip = (s, n = 160) => {
+const clip = (s, n = 90) => {
   const t = (s || '').replace(/\s+/g, ' ').trim();
   return t.length > n ? `${t.slice(0, n)}…` : t;
+};
+
+const extractFocusSnippet = (text, keyword, maxLen = 90) => {
+  if (!text) return '';
+  const str = String(text).replace(/\s+/g, ' ').trim();
+  if (str.length <= maxLen) return str;
+  const kw = String(keyword || '').trim().toLowerCase();
+  const idx = kw ? str.toLowerCase().indexOf(kw) : 0;
+  if (idx === -1) return str.slice(0, maxLen) + '…';
+  const half = Math.floor(maxLen / 2);
+  const start = Math.max(0, idx - half);
+  const end = Math.min(str.length, start + maxLen);
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < str.length ? '…' : '';
+  return prefix + str.slice(start, end).trim() + suffix;
 };
 
 function status() {
@@ -261,7 +276,7 @@ function search(queryText, limit = 20, includeTitles = true) {
         title: r.title || '',
         status: r.status,
         time: localTime(r.updated_at_ms),
-        snippet: clip(r.title, 200),
+        snippet: extractFocusSnippet(r.title, q, 80),
       });
     }
   }
@@ -280,7 +295,7 @@ function search(queryText, limit = 20, includeTitles = true) {
       sessionId: r.session_id,
       role: r.role,
       time: localTime(r.created_at_ms),
-      snippet: clip(r.content, 200),
+      snippet: extractFocusSnippet(r.content, q, 80),
     });
   }
   return hits;
@@ -418,13 +433,56 @@ function checkResult(sessionId, afterMessageId) {
   };
 }
 
-function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, intervalMs = 3000) {
+/**
+ * 等一个会话跑完。异步实现，**不能**用同步 sleep——
+ * 同步会把整个事件循环卡住，HTTP 那边就连不上来了，取消通知也收不到。
+ *
+ * shouldStop: 返回 true 就提前退出（给 notifications/cancelled 用）。
+ */
+async function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, intervalMs = 3000, shouldStop = null) {
   const started = Date.now();
   const deadline = started + timeoutSeconds * 1000;
   let lastSeen = afterMessageId;
   let best = null;
 
+  // 1. 优先即时探测：如果本来就已经 idle 且有产出，直接 0ms 返回，避免多余轮询
+  const initial = checkResult(sessionId, afterMessageId);
+  if (initial.done) {
+    return {
+      done: true,
+      sessionId,
+      waitedAt: localTime(Date.now()),
+      waitedSeconds: 0,
+      lastAssistantMessageId: initial.best ? initial.best.id : null,
+      result: initial.best ? initial.best.text : null,
+    };
+  }
+
+  // 2. 如果指定了非阻塞即时返回 (timeoutSeconds <= 0)，立刻反馈当前状态
+  if (timeoutSeconds <= 0) {
+    return {
+      done: false,
+      sessionId,
+      waitedSeconds: 0,
+      lastAssistantMessageId: initial.best ? initial.best.id : null,
+      result: initial.best ? initial.best.text : null,
+      status: initial.status,
+      note: '会话当前正在执行中（非阻塞即时返回）',
+    };
+  }
+
   while (Date.now() < deadline) {
+    if (typeof shouldStop === 'function' && shouldStop()) {
+      return {
+        done: false,
+        cancelled: true,
+        sessionId,
+        waitedSeconds: Math.round((Date.now() - started) / 1000),
+        lastAssistantMessageId: best ? best.id : null,
+        result: best ? best.text : null,
+        note: '客户端取消了这次等待',
+      };
+    }
     const c = checkResult(sessionId, lastSeen);
     if (c.lastSeen !== lastSeen) lastSeen = c.lastSeen;
     if (c.best) best = c.best;
@@ -439,7 +497,7 @@ function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, interval
         result: best.text,
       };
     }
-    sleep(intervalMs);
+    await new Promise((resolve) => { setTimeout(resolve, intervalMs); });
   }
 
   return {
