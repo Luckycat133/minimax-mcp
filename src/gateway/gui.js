@@ -218,7 +218,11 @@ function front() {
 }
 
 function activate(pid) {
-  gui(['activate', String(pid)]);
+  try {
+    execFileSync('osascript', ['-e', 'tell application "MiniMax Code" to activate'], { timeout: 3000 });
+  } catch (_) {
+    gui(['activate', String(pid)]);
+  }
   return { activated: pid };
 }
 
