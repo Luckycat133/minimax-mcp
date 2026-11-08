@@ -44,10 +44,15 @@
     "minimax",
     "minimax-code",
     "mcp",
+    "model-context-protocol",
+    "mcp-server",
     "agent-skill",
+    "claude-desktop",
+    "cursor",
     "desktop-automation",
     "macos",
     "local-first",
-    "developer-tools"
+    "developer-tools",
+    "ai-agent"
   ]
 }
