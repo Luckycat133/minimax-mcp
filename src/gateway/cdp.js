@@ -339,6 +339,72 @@ class MiniMaxCDPDriver {
   }
 
   /**
+   * 将 MiniMax 窗口带到前台 (零权限 CDP 原生实现)
+   */
+  async bringToFront() {
+    try {
+      await this.send('Page.bringToFront');
+      await this.evaluate('window.focus()');
+      return { ok: true, via: 'cdp' };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /**
+   * 向 Chromium 渲染管道派发原生键盘事件 (零系统权限、亚 10ms 响应)
+   */
+  async dispatchKey(key, modifiers = []) {
+    let mod = 0;
+    if (modifiers.includes('alt')) mod |= 1;
+    if (modifiers.includes('ctrl')) mod |= 2;
+    if (modifiers.includes('cmd') || modifiers.includes('meta')) mod |= 4;
+    if (modifiers.includes('shift')) mod |= 8;
+
+    const lower = String(key).toLowerCase();
+    const vkey = lower === 'escape' ? 27 : (lower === 'return' || lower === 'enter' ? 13 : (lower === 'tab' ? 9 : 0));
+    const code = lower.length === 1 ? `Key${lower.toUpperCase()}` : (lower === 'escape' ? 'Escape' : (lower === 'return' ? 'Enter' : lower));
+
+    await this.send('Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      key: key,
+      code,
+      windowsVirtualKeyCode: vkey,
+      modifiers: mod,
+    });
+    await this.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: key,
+      code,
+      windowsVirtualKeyCode: vkey,
+      modifiers: mod,
+    });
+    return { ok: true, key, modifiers, via: 'cdp' };
+  }
+
+  /**
+   * 向 Chromium 渲染管道派发原生鼠标点击事件 (零系统权限、亚 10ms 响应)
+   */
+  async dispatchClick(x, y, button = 'left') {
+    const btn = button === 'right' ? 'right' : 'left';
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: Math.round(x),
+      y: Math.round(y),
+      button: btn,
+      clickCount: 1,
+    });
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: Math.round(x),
+      y: Math.round(y),
+      button: btn,
+      clickCount: 1,
+    });
+    return { ok: true, clicked: [Math.round(x), Math.round(y)], button, via: 'cdp' };
+  }
+
+  /**
    * Get quota and reset-card status from the UI.
    */
   async getQuotaStatus() {
@@ -350,8 +416,11 @@ class MiniMaxCDPDriver {
         const upgradeBtn = document.querySelector("[data-testid*='upgrade']");
         const text = banner ? banner.innerText.trim() : "";
         const mReset = text.match(/将于\\s*([\\d:]+)\\s*重置/);
+        // 关键修复：精确区分"已达到上限"(硬阻断)与"即将达到上限"(软提醒)
+        const isHardLimited = Boolean(resetBtn) || (text.includes('已达到') && text.includes('上限'));
         return {
-          isLimited: Boolean(banner || resetBtn),
+          isLimited: isHardLimited,
+          isApproachingLimit: Boolean(banner) && !isHardLimited,
           resetAt: mReset ? mReset[1] : null,
           hasResetCard: Boolean(resetBtn && !resetBtn.disabled),
           canBuyCredits: Boolean(buyBtn),

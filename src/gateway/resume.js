@@ -162,14 +162,45 @@ async function autoResume({ dryRun = true, limit = 5, sessionId = null } = {}) {
     // 真正执行恢复动作
     try {
       if (s.type === 'native') {
-        // 原生普通会话：通过 CDP 点击发送/播放按钮
-        const clicked = await cdp.clickElement({ selector: "[data-testid='send-button']" });
+        if (!await cdp.isAvailable()) {
+          throw new Error('CDP 未就绪，无法派发原生继续动作');
+        }
+
+        // 1. 优先确保已切到该会话
+        const meta = db.sessionMeta(s.sessionId);
+        const cands = [meta?.title, meta?.firstUserMessage, s.title]
+          .map((str) => String(str || '').trim())
+          .filter((str) => str.length >= 2);
+
+        await cdp.evaluate(`
+          (() => {
+            const cands = ${JSON.stringify(cands)}.map(x => x.toLowerCase());
+            const items = Array.from(document.querySelectorAll('*')).filter(el => {
+              return el.children.length === 0 && el.innerText && el.innerText.trim();
+            });
+            for (const el of items) {
+              const t = el.innerText.trim().toLowerCase();
+              if (cands.some(c => t.includes(c.slice(0, 10)) || c.includes(t.slice(0, 10)))) {
+                const clickable = el.closest('button, a, [role="button"], div[tabindex], div[class*="item"]') || el.parentElement || el;
+                clickable.click();
+                return true;
+              }
+            }
+            return false;
+          })()
+        `);
+
+        // 2. 点击继续执行按钮 (优先匹配 continue-button / 继续执行，备选 regenerate-button / send-button)
+        const clicked = await cdp.clickElement({
+          selector: "[data-testid='continue-button'], [aria-label*='继续执行'], [data-testid='regenerate-button'], [aria-label*='继续'], [data-testid='send-button']"
+        });
+
         results.push({
           sessionId: s.sessionId,
           title: s.title,
           type: 'native',
-          ok: clicked.ok,
-          action: 'clicked_play_button',
+          ok: clicked && clicked.ok,
+          action: 'clicked_continue_button',
           detail: clicked,
         });
       } else {

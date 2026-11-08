@@ -501,6 +501,34 @@ async function tick(opts = {}) {
     });
   }
 
+  // ---------- 6. 额度恢复断点自动续传 ----------
+  if (opts.autoResume !== false) {
+    try {
+      const { autoResume } = require('./resume');
+      const rResume = await autoResume({ dryRun, limit: 2 });
+      if (rResume && rResume.resumedCount > 0) {
+        for (const item of (rResume.results || [])) {
+          if (item.ok || item.planned) {
+            emit({
+              key: `auto_resume:${item.sessionId}:${now}`,
+              at: new Date(now).toISOString(),
+              type: 'auto_resume',
+              sessionId: item.sessionId,
+              title: item.title,
+              detail: item.action || 'auto_resumed',
+            });
+            actions.push({
+              tool: 'minimax_auto_resume',
+              args: { sessionId: item.sessionId },
+              ok: Boolean(item.ok),
+              why: '额度恢复后自动断点续传',
+            });
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
   // ---------- 保存状态 ----------
   const nextSessions = {};
   for (const [sid, s] of cur) {
