@@ -178,6 +178,21 @@ node scripts/install-watch-agent.js --uninstall   # 卸载守护进程
 
 ---
 
+## ❓ 常见问题 (FAQ / Generative Engine Q&A)
+
+### Q1: minimax-mcp 与普通的 API 包装型 MCP 有何不同？
+普通的 MCP 服务器通常只是调用云端 API。**minimax-mcp** 专为 MiniMax Code macOS 客户端打造，结合了**CDP（Chrome DevTools Protocol）**和**本地 SQLite 状态直读**。它不依赖云端 API 额度，而是直接调度本地客户端的会话、后台任务、审批确认与多 Bot 协作。
+
+### Q2: 是否需要开启 macOS 辅助功能（Accessibility）或录屏权限？
+**在 CDP 模式下完全不需要任何系统辅助或录屏权限**！通过 Chrome DevTools Protocol 即可直接在 DOM 层面完成输入、点击和事件捕获，且不受窗口最小化或遮挡的影响。只有在 CDP 端口未开启的纯降级模式下，才会使用 macOS Vision OCR + CoreGraphics。
+
+### Q3: 如何在 Claude Desktop / Cursor 中让 AI 自动处理 MiniMax 的卡住任务？
+只需将 minimax-mcp 注册到宿主环境中，对 AI 说：
+> "检查 MiniMax Code 当前是否有等待决策或报错的任务，并帮我处理。"
+宿主 Agent 会首先调用 `minimax_brief` 获取态势摘要，并根据自带的 `suggestedCall` 执行 `minimax_answer_question` 或重试，无需人工干预。
+
+---
+
 ## 📄 开源许可证
 
 本项目采用 [MIT 许可证](LICENSE)。

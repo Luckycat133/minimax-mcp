@@ -1,0 +1,71 @@
+# minimax-mcp
+
+> Local-first stdio MCP server and Agent Skill that connects AI agents to MiniMax Code desktop app on macOS via Chrome DevTools Protocol (CDP) and SQLite runtime state.
+
+## Overview
+minimax-mcp allows any MCP-compatible AI coding assistant (Claude Desktop, Cursor, Codex, Antigravity, Windsurf) to inspect, monitor, control, and automate MiniMax Code on macOS with 27 specialized tools across 3 risk levels.
+
+- **Category**: Model Context Protocol (MCP) Server / Developer Tools / macOS Automation
+- **Author**: Luckycat133
+- **Repository**: https://github.com/Luckycat133/minimax-mcp
+- **License**: MIT
+- **Runtime**: Node.js >= 22 (macOS)
+- **Official Protocol**: MCP Specification (stdio JSON-RPC 2.0)
+
+## Key Capabilities
+1. **High-Performance Dual-Plane Control**:
+   - Control Plane (Write): Connects directly via Chrome DevTools Protocol (CDP). Zero macOS accessibility permissions required, immune to window occlusion/minimization, microsecond-level DOM & TipTap editor automation. Automatic fallback to CoreGraphics + Vision OCR.
+   - Observation Plane (Read): Queries local SQLite runtime state directly for millisecond-latency task status, questionnaires, and conversation streaming.
+2. **Dynamic Attention Queue (`minimax_brief`)**:
+   - Prioritizes sessions: Pending Decisions > Errors > Stuck > Running > Just Finished. Collapses 100+ idle sessions to save 90% prompt tokens.
+   - Provides structured next-action recommendations (`suggestedCall`) for lightweight agents.
+3. **Proactive Watcher & Self-Healing (`minimax_watch`)**:
+   - Auto-tracks background tasks, captures state events, and supports autonomous resume.
+
+## Quick Installation & MCP Configuration
+
+### 1. Claude Desktop (`claude_desktop_config.json`)
+```json
+{
+  "mcpServers": {
+    "minimax": {
+      "command": "node",
+      "args": ["/path/to/minimax-mcp/mcp-server.js"]
+    }
+  }
+}
+```
+
+### 2. Cursor (`~/.cursor/mcp.json`)
+```json
+{
+  "mcpServers": {
+    "minimax": {
+      "command": "node",
+      "args": ["/path/to/minimax-mcp/mcp-server.js"]
+    }
+  }
+}
+```
+
+### 3. Verification Command
+```bash
+node scripts/doctor.js
+```
+
+## Tool Index (27 Tools)
+- `minimax_brief`: Get prioritized situational snapshot across all sessions.
+- `minimax_status`: Get real-time runtime status of MiniMax Code.
+- `minimax_list_sessions`: List active and historical conversation sessions.
+- `minimax_read_session`: Read messages and task outputs from a session.
+- `minimax_send_message`: Send a prompt or reply to a session via CDP/DOM.
+- `minimax_answer_question`: Submit answers to interactive questionnaires/confirmations.
+- `minimax_new_task`: Start a new task in MiniMax Code.
+- `minimax_stop_generation`: Abort currently running generation.
+- `minimax_watch`: Poll and stream runtime events.
+- `minimax_screenshot`: Capture window screenshot for visual inspection.
+
+## Use Cases
+- Asking Claude Desktop or Cursor to monitor and unblock long-running MiniMax Code agent tasks.
+- Multi-agent orchestration bridging MiniMax models with external agent environments.
+- Automated daily check-ins, testing, and continuous delivery with MiniMax Code.
