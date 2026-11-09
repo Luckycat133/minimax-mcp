@@ -1,0 +1,23 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+startCommand:
+  type: stdio
+configSchema:
+  type: object
+  properties:
+    minimaxPython:
+      type: string
+      default: "python3"
+      description: "Python 3 executable path for background scripts"
+    minimaxSqliteBin:
+      type: string
+      default: "sqlite3"
+      description: "SQLite3 binary path for runtime state queries"
+commandFunction: |-
+  (config) => ({
+    command: "node",
+    args: ["mcp-server.js"],
+    env: {
+      MINIMAX_PYTHON: config.minimaxPython || "python3",
+      MINIMAX_SQLITE_BIN: config.minimaxSqliteBin || "sqlite3"
+    }
+  })

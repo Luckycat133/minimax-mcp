@@ -1,0 +1,116 @@
+# minimax-mcp Full Documentation
+
+> Local-first stdio MCP server and Agent Skill that lets AI agents read and operate MiniMax Code on macOS.
+
+- **Repository**: https://github.com/Luckycat133/minimax-mcp
+- **Author**: Luckycat133
+- **License**: MIT
+- **Protocol**: Model Context Protocol (MCP) JSON-RPC 2.0 stdio
+- **Runtime**: Node.js >= 22 (macOS)
+
+---
+
+## 1. Architecture Overview
+
+minimax-mcp operates a high-performance dual-plane architecture:
+- **Control Plane (Write)**: Connects via Chrome DevTools Protocol (CDP) port. Microsecond-level DOM & TipTap rich editor automation. Requires 0 macOS accessibility permissions, 0 screen capture permissions, and is immune to window occlusion/minimization. Automatic fallback to CoreGraphics + macOS Vision OCR.
+- **Observation Plane (Read)**: Direct read-only queries against local SQLite runtime state database (`runtime-state.sqlite`). Millisecond-latency task status, questionnaires, and conversation stream monitoring.
+
+```text
+┌────────────────────────────────────────────────────────┐
+│                   Agent Host / Client                  │
+│       (Claude Desktop, Cursor, Antigravity, etc.)      │
+└───────────────────────────┬────────────────────────────┘
+                            │ stdio (JSON-RPC 2.0)
+┌───────────────────────────▼────────────────────────────┐
+│                       minimax-mcp                      │
+│     (27 Tools · 3 Risk Levels · Proactive Watcher)     │
+└───────────┬────────────────────────────────┬───────────┘
+            │                                │
+      [Control Plane]                  [Data Plane]
+            │                                │
+ ┌──────────┴──────────┐            ┌────────┴──────────┐
+ │ Chrome DevTools     │            │ Local SQLite DB   │
+ │ Protocol (CDP)      │            │ Runtime State     │
+ └─────────────────────┘            └───────────────────┘
+```
+
+---
+
+## 2. Quickstart & MCP Client Configuration
+
+### Claude Desktop (`claude_desktop_config.json`)
+```json
+{
+  "mcpServers": {
+    "minimax": {
+      "command": "node",
+      "args": ["/path/to/minimax-mcp/mcp-server.js"]
+    }
+  }
+}
+```
+
+### Cursor (`~/.cursor/mcp.json`)
+```json
+{
+  "mcpServers": {
+    "minimax": {
+      "command": "node",
+      "args": ["/path/to/minimax-mcp/mcp-server.js"]
+    }
+  }
+}
+```
+
+### Self-Diagnostics
+```bash
+node scripts/doctor.js
+```
+
+---
+
+## 3. Tool Index (27 Tools Across 3 Risk Levels)
+
+### Read-Only Tools (Zero-Risk)
+- `minimax_brief`: Prioritized situational snapshot of sessions (Waiting Decisions > Errors > Stuck > Running > Finished). Saves 90% prompt tokens.
+- `minimax_status`: Real-time runtime status of MiniMax Code app, SQLite DB path, and CDP connection state.
+- `minimax_list_sessions`: List active and historical conversation sessions with metadata.
+- `minimax_read_session`: Read messages, thinking blocks, and tool outputs from a given session.
+- `minimax_tail_sessions`: Stream recent session events and status changes.
+- `minimax_search`: Full-text search across all conversations and code snippets.
+- `minimax_pending`: Query interactive questionnaires and confirmations awaiting human decision.
+- `minimax_tasks`: Inspect background tasks and generation status.
+- `minimax_windows`: List MiniMax Code window geometry and screen space.
+- `minimax_screenshot`: Capture window screenshot for visual inspection.
+- `minimax_get_result`: Retrieve completed task execution results.
+- `minimax_find_text`: Locate UI element coordinates using macOS Vision OCR.
+- `minimax_events`: Read event audit trail.
+
+### Interactive Tools (Low / Medium Risk)
+- `minimax_draft_answer`: Stage or preview an answer to an interactive confirmation without sending.
+- `minimax_answer_question`: Submit choice or text to an interactive questionnaire.
+- `minimax_send_message`: Send a prompt or reply to a session via CDP/DOM.
+- `minimax_new_task`: Start a new conversation or background coding task.
+- `minimax_open_session`: Switch active workspace to a specific session.
+- `minimax_click`: Simulate mouse click at specific screen or element coordinates.
+- `minimax_type`: Input text into active input field.
+- `minimax_key`: Simulate keyboard keypress or shortcut (e.g. Return, Tab).
+- `minimax_click_text`: OCR-guided text element click.
+- `minimax_bot_message`: Dispatch message to a specific bot in a multi-bot collaboration.
+
+### Management & Control Tools (Controlled Risk)
+- `minimax_activate`: Bring MiniMax Code window to foreground.
+- `minimax_stop_generation`: Abort currently running generation or build.
+- `minimax_watch`: Configure proactive background watcher policy (frequency, auto-nudge, mode).
+- `minimax_auto_resume`: Automatically resume stuck sessions based on policy rules.
+
+---
+
+## 4. Frequently Asked Questions (FAQ)
+
+### Q: Does minimax-mcp require macOS Accessibility or Screen Recording permissions?
+In CDP mode, zero macOS Accessibility or Screen Recording permissions are needed. It interacts directly with the DOM and TipTap editor over Chrome DevTools Protocol. CoreGraphics/OCR is only used as a fallback.
+
+### Q: How does it preserve prompt tokens?
+`minimax_brief` collapses hundreds of idle historical conversations and only surfaces sessions needing attention (e.g., waiting for human decision or errored), reducing token consumption by up to 90%.
