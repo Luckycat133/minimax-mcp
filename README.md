@@ -3,6 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org/)
 [![MCP Specification](https://img.shields.io/badge/MCP-2024--11--05-blue.svg)](https://modelcontextprotocol.io/)
+[![Smithery](https://smithery.ai/badge/@Luckycat133/minimax-mcp)](https://smithery.ai/server/@Luckycat133/minimax-mcp)
+[![Glama](https://glama.ai/mcp/servers/Luckycat133/minimax-mcp/badge)](https://glama.ai/mcp/servers/Luckycat133/minimax-mcp)
 
 **minimax-mcp** 是专为 **MiniMax Code** 桌面客户端（macOS）打造的本地优先 stdio MCP (Model Context Protocol) 服务器与 Agent 技能包。
 
@@ -130,6 +132,18 @@ npm run doctor            # 环境依赖与权限自检
 ```
 
 ### 3. 客户端 MCP 配置
+
+#### 方式 A：通过 Smithery 一键自动安装（推荐）
+
+```bash
+# 为 Claude Desktop 安装
+npx -y @smithery/cli install @Luckycat133/minimax-mcp --client claude
+
+# 为 Cursor 安装
+npx -y @smithery/cli install @Luckycat133/minimax-mcp --client cursor
+```
+
+#### 方式 B：手动 JSON 配置
 
 在 Claude Desktop / Cursor / Antigravity 的 MCP 配置文件中添加：
 
