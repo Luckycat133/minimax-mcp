@@ -47,6 +47,8 @@ function oneLine(text, n = 90) {
 function scanSessions(limit) {
   return db.query(
     'select s.session_id, s.title, s.status, s.updated_at_ms, s.error_message, ' +
+    '(select cause from local_runtime_queue_pauses qp where qp.session_id = s.session_id) as queue_pause_cause, ' +
+    '(select count(*) from local_runtime_queue_items qi where qi.session_id = s.session_id and qi.status = \'queued\') as queued_items, ' +
     '(select count(*) from local_runtime_message_rows m where m.session_id = s.session_id) as msgs, ' +
     "(select m.role from local_runtime_message_rows m where m.session_id = s.session_id order by m.id desc limit 1) as last_role, " +
     "(select m.created_at_ms from local_runtime_message_rows m where m.session_id = s.session_id order by m.id desc limit 1) as last_ms, " +
@@ -161,15 +163,33 @@ function brief(opts = {}) {
       continue;
     }
 
+    // 1.5) 队列冻结 / 熔断挂起（优先度高于普通报错，可直接自愈）
+    if (s.queue_pause_cause || (s.queued_items && Number(s.queued_items) > 0)) {
+      items.push({
+        ...base,
+        priority: 1.5,
+        kind: 'paused_queue',
+        why: `消息队列已暂停 (${s.queue_pause_cause || 'turn-final-failure'})，积压 ${s.queued_items || 0} 条未处理消息`,
+        next: `一键解除队列暂停：minimax_auto_resume {dryRun:false, sessionId:"${s.session_id}"}`,
+        suggestedCall: { tool: 'minimax_auto_resume', arguments: { dryRun: false, sessionId: s.session_id } },
+      });
+      continue;
+    }
+
     // 2) 出错
     if (s.status === 'error') {
+      const isQuota = (s.error_message || '').includes('2056') || (s.error_message || '').includes('Token Plan');
       items.push({
         ...base,
         priority: 2,
-        kind: 'error',
-        why: `会话报错：${oneLine(s.error_message, 100) || '(没有错误信息)'}`,
-        next: '读末条消息看上下文：minimax_read_session {session:"' + s.session_id + '", limit:3}',
-        suggestedCall: { tool: 'minimax_read_session', arguments: { session: s.session_id, limit: 3 } },
+        kind: isQuota ? 'quota_error' : 'error',
+        why: isQuota ? `Token Plan 额度耗尽：${oneLine(s.error_message, 100)}` : `会话报错：${oneLine(s.error_message, 100) || '(没有错误信息)'}`,
+        next: isQuota
+          ? `额度恢复后自动续传：minimax_auto_resume {dryRun:false, sessionId:"${s.session_id}"}`
+          : '读末条消息看上下文：minimax_read_session {session:"' + s.session_id + '", limit:3}',
+        suggestedCall: isQuota
+          ? { tool: 'minimax_auto_resume', arguments: { dryRun: false, sessionId: s.session_id } }
+          : { tool: 'minimax_read_session', arguments: { session: s.session_id, limit: 3 } },
       });
       continue;
     }

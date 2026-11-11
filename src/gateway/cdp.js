@@ -21,6 +21,24 @@ class MiniMaxCDPDriver {
     this._ws = null;
     this._reqId = 1;
     this._targetInfo = null;
+    this._idleTimer = null;
+  }
+
+  /**
+   * Reset idle auto-disconnect timer.
+   * Auto-closes WebSocket after 3.5s of inactivity so Node event loop can cleanly exit.
+   */
+  _resetIdleTimer() {
+    if (this._idleTimer) {
+      clearTimeout(this._idleTimer);
+      this._idleTimer = null;
+    }
+    this._idleTimer = setTimeout(() => {
+      this.close();
+    }, 3500);
+    if (this._idleTimer && typeof this._idleTimer.unref === 'function') {
+      this._idleTimer.unref();
+    }
   }
 
   /**
@@ -124,12 +142,17 @@ class MiniMaxCDPDriver {
    * Send a CDP method and wait for response.
    */
   async send(method, params = {}) {
+    if (this._idleTimer) {
+      clearTimeout(this._idleTimer);
+      this._idleTimer = null;
+    }
     const ws = await this.connect();
     const id = this._reqId++;
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         ws.removeEventListener('message', onMessage);
+        this._resetIdleTimer();
         reject(new Error(`CDP request timeout for ${method} (id=${id})`));
       }, DEFAULT_TIMEOUT_MS);
 
@@ -139,6 +162,7 @@ class MiniMaxCDPDriver {
           if (data.id === id) {
             clearTimeout(timer);
             ws.removeEventListener('message', onMessage);
+            this._resetIdleTimer();
             if (data.error) {
               reject(new Error(`CDP error: ${JSON.stringify(data.error)}`));
             } else {
@@ -148,6 +172,7 @@ class MiniMaxCDPDriver {
         } catch (e) {
           clearTimeout(timer);
           ws.removeEventListener('message', onMessage);
+          this._resetIdleTimer();
           reject(e);
         }
       };
@@ -521,6 +546,10 @@ class MiniMaxCDPDriver {
    * Disconnect WebSocket.
    */
   close() {
+    if (this._idleTimer) {
+      clearTimeout(this._idleTimer);
+      this._idleTimer = null;
+    }
     if (this._ws) {
       try { this._ws.close(); } catch {}
       this._ws = null;

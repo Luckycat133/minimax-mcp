@@ -99,6 +99,19 @@ function one(sql, params = []) {
   return rows[0] || null;
 }
 
+/** 执行一条无返回写操作（慎用，仅用于应急解冻/清理锁）。 */
+function execute(sql, params = []) {
+  if (!dbExists()) {
+    throw new Error(`找不到 MiniMax 数据库: ${DB_PATH}`);
+  }
+  const inlined = inlineParams(sql, params);
+  execFileSync(SQLITE_BIN, [DB_PATH, inlined], {
+    encoding: 'utf8',
+    timeout: 15000,
+  });
+  return { ok: true };
+}
+
 const localTime = (ms) => {
   if (!ms) return null;
   const d = new Date(Number(ms));
@@ -144,6 +157,16 @@ function status() {
     // 万一以后加了别的中间态，按字符串匹配会悄悄变成 0。
     'select count(*) as n from local_runtime_background_tasks where ended_at_ms is null' 
   );
+  let pausedQueues = 0;
+  let queuedItems = 0;
+  try {
+    const pauseRow = one('select count(*) as n from local_runtime_queue_pauses');
+    pausedQueues = Number(pauseRow?.n || 0);
+  } catch {}
+  try {
+    const queuedRow = one("select count(*) as n from local_runtime_queue_items where status = 'queued'");
+    queuedItems = Number(queuedRow?.n || 0);
+  } catch {}
   return {
     dbPath: DB_PATH,
     dbFound: true,
@@ -151,6 +174,8 @@ function status() {
     messages: Number(row?.messages || 0),
     lastActivity: localTime(row?.lastActivityMs),
     runningTasks: Number(running?.n || 0),
+    pausedQueues,
+    queuedItems,
   };
 }
 
@@ -605,6 +630,7 @@ module.exports = {
   DB_PATH,
   dbExists,
   query,
+  execute,
   status,
   listSessions,
   recentlyTouchedSessions,
