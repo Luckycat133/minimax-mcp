@@ -160,15 +160,15 @@ function mainWindow() {
   return null;
 }
 
-/** 用 LaunchServices 打开/激活 App。窗口被隐藏或在别的 Space 时，只有这条能把它拉回来。 */
+/** 用 LaunchServices 打开/激活 App，并强制挂载 CDP 调试端口 9223 供 Agent 自动化调用。 */
 function openApp() {
   try {
-    execFileSync('open', ['-a', APP], { timeout: 20000 });
+    execFileSync('open', ['-a', APP, '--args', '--remote-debugging-port=9223'], { timeout: 20000 });
   } catch (err) {
     throw new Error(`启动 MiniMax Code 失败（可能没安装）：${String(err.stderr || err.message).slice(0, 200)}`);
   }
   sleep(1200);
-  return { opened: APP };
+  return { opened: APP, cdpPort: 9223 };
 }
 
 /**
@@ -243,8 +243,12 @@ function ensureFront(tries = 4) {
 }
 
 function sleep(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) { /* 同步等待 */ }
+  try {
+    execFileSync('sleep', [String(ms / 1000)], { stdio: 'ignore' });
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* 同步退化 */ }
+  }
 }
 
 function click(x, y, button = 'left') {

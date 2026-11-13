@@ -144,10 +144,24 @@ async function dispatch(name, args = {}, ctx = null) {
 
       case 'minimax_status': {
         const s = db.status();
-        if (await cdp.isAvailable()) {
+        const pid = gui.minimaxPid();
+        s.app = {
+          running: Boolean(pid),
+          pid: pid || null,
+        };
+        const cdpUp = await cdp.isAvailable();
+        s.cdp = {
+          online: cdpUp,
+          port: cdp.port,
+        };
+        if (cdpUp) {
           try {
             s.quota = await cdp.getQuotaStatus();
           } catch (_) {}
+        } else if (s.app.running) {
+          s.cdp.hint = 'MiniMax 正在运行但未开启 CDP 调试端口 (9223)。可调用 minimax_activate({ relaunchWithDebug: true }) 挂载调试端口。';
+        } else {
+          s.cdp.hint = 'MiniMax Code 尚未运行。可调用 minimax_activate 启动。';
         }
         return ok(s);
       }
@@ -189,6 +203,19 @@ async function dispatch(name, args = {}, ctx = null) {
       }
 
       case 'minimax_activate': {
+        if (args.relaunchWithDebug) {
+          const { launchWithDebug } = require(path.join(__dirname, '..', '..', 'scripts', 'launch-with-debug'));
+          const r = await launchWithDebug();
+          if (!r.ok) return fail(`挂载调试端口重启失败: ${r.error}`);
+          return ok({
+            relaunchWithDebug: true,
+            cdp: r,
+            activeApp: gui.activeApp(),
+            topmostWindow: gui.topmostApp(),
+            window: gui.mainWindow(),
+          });
+        }
+
         // 1. 优先走 CDP 原生聚焦 (亚 10ms，免 LaunchServices/AppleScript 等待)
         if (await cdp.isAvailable()) {
           try {

@@ -100,8 +100,17 @@ const TOOLS = [
   },
   {
     name: 'minimax_activate',
-    description: '将 MiniMax 窗口唤醒至系统前台并返回焦点窗口信息。',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    description: '将 MiniMax 窗口唤醒至系统前台并返回焦点窗口信息。可指定 relaunchWithDebug 自动挂载调试端口。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relaunchWithDebug: {
+          type: 'boolean',
+          description: '若 MiniMax 未开启 CDP 调试端口 (9223)，是否优雅重启并挂载调试端口。',
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'minimax_screenshot',

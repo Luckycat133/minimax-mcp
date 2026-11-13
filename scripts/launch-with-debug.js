@@ -104,7 +104,32 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error('[LaunchDebug] Fatal:', err.message);
-  process.exit(1);
-});
+async function launchWithDebug(port = PORT) {
+  if (await probeCdp(port)) return { ok: true, alreadyUp: true, port };
+  await stopAppGracefully();
+  try {
+    execSync(`open -a "${APP_PATH}" --args --remote-debugging-port=${port}`);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  for (let i = 0; i < 30; i++) {
+    execSync('sleep 0.5');
+    if (await probeCdp(port)) {
+      return { ok: true, launched: true, port };
+    }
+  }
+  return { ok: false, error: `启动超时：CDP 端口 ${port} 在 15s 内未就绪` };
+}
+
+if (require.main === module) {
+  main().catch(err => {
+    console.error('[LaunchDebug] Fatal:', err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  launchWithDebug,
+  probeCdp,
+  stopAppGracefully,
+};
