@@ -26,30 +26,24 @@ const LEVEL = {
   minimax_draft_answer: 'read',
   minimax_tasks: 'read',
   minimax_windows: 'read',
-  minimax_find_text: 'read',
   minimax_get_result: 'read',   // 轮询等待，不改任何状态
   minimax_events: 'read',
+  minimax_bot_roster: 'read',   // 只读 Bot 架构配置
 
-  // 只动界面：改变窗口焦点、光标位置、临时输入，都能靠再点一下恢复
+  // 只动界面：改变窗口焦点、临时输入，都能靠再点一下恢复
   minimax_activate: 'ui',
   minimax_screenshot: 'ui',
   minimax_new_task: 'ui',
-  minimax_open_session: 'ui',
-  minimax_click: 'ui',
-  minimax_click_text: 'ui',
-  minimax_type: 'ui',
-  minimax_key: 'ui',
 
   // stop_generation 归 ui 而不是 commit，是个刻意的判断：
-  // 它只按 Esc 截断当前这轮，不改对话历史，用户随时可以重发。
-  // 标成 destructive 会让宿主每次都弹确认框——而"停下来"恰恰是出问题时最该顺手能做的动作，
-  // 加确认等于在刹车上加一道锁。真要防误触，靠的是"MiniMax 必须在前台"那道校验。
+  // 它只截断当前这轮，不改对话历史，用户随时可以重发。
   minimax_stop_generation: 'ui',
 
   // 会改变对话内容：发出去、提交上去，都不是点一下能恢复的
   minimax_send_message: 'commit',
   minimax_answer_question: 'commit',
   minimax_bot_message: 'commit',
+  minimax_bot_turn: 'commit',
   minimax_auto_resume: 'commit',
 
   // watch 会代答/代催，所以按 commit 处理。它能不能动，由策略决定（见 GATES）
@@ -64,7 +58,8 @@ const GATES = {
   minimax_send_message: 'send 默认 false；另有活跃守卫，最近 300s 内有会话活动就拒绝',
   minimax_answer_question: 'preview 默认 true；真提交要 preview:false + force:true',
   minimax_watch: 'mode 默认 act 但只动低风险：仅当风险=low 且有推荐答案、人离开 ≥minIdleSeconds、每轮最多 maxActionsPerTick 个动作',
-  minimax_bot_message: 'action=read 时只读；action=send 会向 Bot 或群聊发送消息',
+  minimax_bot_message: 'action=read 时只读；action=send 时需显式提供 text 内容',
+  minimax_bot_turn: 'action=cancel/resume_pending/answer 需指定具体操作及参数',
   minimax_auto_resume: 'dryRun 默认 true；只有显式 dryRun:false 才会触发恢复操作',
 };
 
@@ -72,12 +67,16 @@ const GATES = {
 const IDEMPOTENT = new Set([
   'minimax_status', 'minimax_brief', 'minimax_list_sessions', 'minimax_read_session',
   'minimax_tail_sessions', 'minimax_search', 'minimax_pending', 'minimax_draft_answer',
-  'minimax_tasks', 'minimax_windows', 'minimax_find_text', 'minimax_screenshot',
-  'minimax_activate',
+  'minimax_tasks', 'minimax_windows', 'minimax_screenshot', 'minimax_activate',
+  'minimax_bot_roster',
 ]);
 
 function levelOf(name) {
   return LEVEL[name] || 'commit'; // 没登记的一律按最危险处理
+}
+
+function gateOf(name) {
+  return GATES[name] || '';
 }
 
 function annotationsFor(name) {
@@ -99,15 +98,17 @@ function annotate(tools) {
   }));
 }
 
-/** 取某个 commit 工具的闸门说明；不是 commit 级返回 null。 */
-function gateOf(name) {
-  return levelOf(name) === 'commit' ? (GATES[name] || null) : null;
-}
-
-/** 需要写审计日志的级别。 */
 function needsAudit(name) {
-  const level = levelOf(name);
-  return level === 'ui' || level === 'commit';
+  return levelOf(name) !== 'read';
 }
 
-module.exports = { LEVEL, GATES, levelOf, gateOf, annotationsFor, annotate, needsAudit };
+module.exports = {
+  LEVEL,
+  GATES,
+  IDEMPOTENT,
+  levelOf,
+  gateOf,
+  annotationsFor,
+  annotate,
+  needsAudit,
+};

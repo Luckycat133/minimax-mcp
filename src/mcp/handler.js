@@ -27,8 +27,8 @@ function setTasksEnabled(v) { tasksEnabled = v === true; }
 const READONLY = new Set([
   'minimax_brief', 'minimax_status', 'minimax_list_sessions', 'minimax_read_session',
   'minimax_tail_sessions', 'minimax_search', 'minimax_pending', 'minimax_draft_answer',
-  'minimax_tasks', 'minimax_windows', 'minimax_find_text', 'minimax_get_result',
-  'minimax_events',
+  'minimax_tasks', 'minimax_windows', 'minimax_get_result', 'minimax_events',
+  'minimax_bot_roster',
 ]);
 
 function ok(payload) {
@@ -300,31 +300,33 @@ async function dispatch(name, args = {}, ctx = null) {
 
         const atParsed = args.at !== undefined && args.at !== null ? parseAt(args.at) : null;
 
+        // 目标会话切换（若显式指定 sessionId 或 newSession）
+        const targetSid = (args.sessionId || args.session) ? db.resolveSession(args.sessionId || args.session) : null;
+        if (await cdp.isAvailable()) {
+          if (targetSid) {
+            await cdp.switchSession(targetSid);
+          } else if (args.newSession === true) {
+            await cdp.newTask();
+          }
+        }
+
         // 预览模式：只报告会发生什么，不点、不粘、不发。只读，所以不受守卫限制。
         if (args.preview === true) {
           const busy = guardCandidates()
             .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
             .filter((s) => s.idleSeconds < quietSeconds);
 
-          if (!atParsed && await cdp.isAvailable()) {
-            return ok({
-              preview: true,
-              wouldSend: args.send === true,
-              via: 'cdp',
-              busySessions: busy.map((s) => ({ sessionId: s.sessionId, title: s.title, idleSeconds: s.idleSeconds, source: s.source })),
-              guard: { busy: busy.length > 0, quietSeconds },
-            });
-          }
-
           const win = gui.mainWindow();
           const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, layout);
-          if (!coords) return fail('拿不到 MiniMax 窗口位置，请用 at 指定输入框坐标');
-          const overlay = blockedByOverlay(coords.x, coords.y);
+
           return ok({
             preview: true,
             wouldSend: args.send === true,
-            inputAt: coords,
-            overlay: overlay ? { app: overlay.app, title: overlay.title } : null,
+            via: await cdp.isAvailable() ? 'cdp' : 'gui',
+            inputAt: coords || { via: 'cdp' },
+            targetSessionId: targetSid,
+            newSession: args.newSession === true,
+            overlay: coords ? blockedByOverlay(coords.x, coords.y) : null,
             activeApp: gui.activeApp(),
             busySessions: busy.map((s) => ({ sessionId: s.sessionId, title: s.title, idleSeconds: s.idleSeconds, source: s.source })),
             guard: { busy: busy.length > 0, quietSeconds },
@@ -333,7 +335,7 @@ async function dispatch(name, args = {}, ctx = null) {
 
         const win = gui.mainWindow();
         const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, layout);
-        if (!coords && !await cdp.isAvailable()) return fail('拿不到 MiniMax 窗口位置，请用 at 指定输入框坐标');
+        if (!coords && !await cdp.isAvailable()) return fail('拿不到 MiniMax 窗口位置且 CDP 未就绪');
 
         // 守卫：候选会话里有刚动过的就不发，除非显式 force。
         // 防止把自动化/测试消息插进用户正在进行的工作。
@@ -353,7 +355,7 @@ async function dispatch(name, args = {}, ctx = null) {
           try {
             await cdp.typeMessage(args.message);
             if (args.send !== true) {
-              return ok({ sent: false, note: '已通过 CDP 注入未发送；send=true 才会发送', via: 'cdp' });
+              return ok({ sent: false, note: '已通过 CDP 注入未发送；send=true 才会发送', via: 'cdp', sessionId: targetSid });
             }
             const before = db.maxMessageId();
             await cdp.sendMessage();
@@ -415,46 +417,6 @@ async function dispatch(name, args = {}, ctx = null) {
           verified: false,
           warning: '回车了但数据库里没出现这条消息，大概率没发出去；请截图检查输入框是否还留着文字',
         });
-      }
-
-      case 'minimax_click': {
-        // 1. 优先走 CDP 零权限高速鼠标派发 (亚 10ms，免 macOS 辅助功能权限与等待)
-        if (await cdp.isAvailable()) {
-          try {
-            const r = await cdp.dispatchClick(args.x, args.y, args.button || 'left');
-            if (r && r.ok) return ok(r);
-          } catch (_) {}
-        }
-
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        const overlay = blockedByOverlay(args.x, args.y);
-        if (overlay) {
-          return fail(`坐标 (${args.x},${args.y}) 被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}，点下去会点到它`);
-        }
-        return ok(gui.click(args.x, args.y, args.button || 'left'));
-      }
-
-      case 'minimax_type': {
-        // 打字会往用户正在编辑的输入框里塞东西，同样过活跃守卫。
-        const busy = guardCandidates()
-          .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
-          .filter((s) => s.idleSeconds < 300);
-        if (busy.length > 0 && args.force !== true) {
-          return fail(`有会话刚还在活动（${busy.map((s) => `${s.idleSeconds}s 前`).join('；')}），已拒绝输入以免打扰。确认要输就加 force: true`);
-        }
-
-        // 1. 优先走 CDP 零权限输入（无需前台聚焦，直接注入 TipTap/ProseMirror）
-        if (await cdp.isAvailable()) {
-          try {
-            const res = await cdp.typeMessage(args.text, { append: true });
-            if (res && res.ok) {
-              return ok({ typed: args.text.length, via: 'cdp', currentText: res.currentText });
-            }
-          } catch (_) {}
-        }
-
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        return ok(gui.typeText(args.text));
       }
 
       case 'minimax_get_result': {
@@ -627,78 +589,6 @@ async function dispatch(name, args = {}, ctx = null) {
         });
       }
 
-      case 'minimax_find_text': {
-        // 1. 优先走 CDP DOM 毫秒级文本探测（100% 精确，亚 40ms，无视窗口遮挡）
-        if (await cdp.isAvailable()) {
-          try {
-            const matches = await cdp.findText(args.text);
-            if (matches && matches.length > 0) {
-              const picked = matches[args.index || 0] || matches[0];
-              return ok({
-                query: args.text,
-                total: matches.length,
-                picked,
-                matches,
-                via: 'cdp',
-                hint: '通过 CDP DOM 探测成功，可用 minimax_click_text 或 minimax_click 点击',
-              });
-            }
-          } catch (_) {}
-        }
-
-        const region = args.region || (() => {
-          const w = gui.mainWindow();
-          return w ? { x: w.x, y: w.y, width: w.width, height: w.height } : null;
-        })();
-        const r = ocr.find(args.text, {
-          region,
-          mode: args.mode || 'contains',
-          index: args.index || 0,
-          refresh: args.refresh !== false,
-        });
-        return ok({
-          query: r.query,
-          total: r.total,
-          picked: r.picked,
-          matches: r.matches,
-          scanned: r.scanned,
-          region: r.region,
-          hint: r.total ? '用 minimax_click_text 或 minimax_click 点 picked.cx/cy' : '没找到；换更短的片段，或用 minimax_screenshot 看图',
-        });
-      }
-
-      case 'minimax_click_text': {
-        // 1. 优先尝试 CDP DOM 点击（免权限、100% 精准）
-        if (await cdp.isAvailable()) {
-          try {
-            const r = await cdp.clickElement({ text: args.text });
-            if (r && r.ok) {
-              return ok({ clicked: r.text || args.text, via: 'cdp', tag: r.clickedTag });
-            }
-          } catch (_) {}
-        }
-
-        // 2. 降级走 OCR 识别 + GUI 事件注入
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        const win = gui.mainWindow();
-        const region = args.region || (win ? { x: win.x, y: win.y, width: win.width, height: win.height } : null);
-        const r = ocr.find(args.text, {
-          region,
-          mode: args.mode || 'contains',
-          index: args.index || 0,
-          refresh: true,
-        });
-        if (!r.picked) {
-          return fail(`屏幕上找不到「${args.text}」（扫了 ${r.scanned} 段文字）`);
-        }
-        const overlay = blockedByOverlay(r.picked.cx, r.picked.cy);
-        if (overlay) {
-          return fail(`「${r.picked.text}」的位置被 ${overlay.app} 盖住了，先移开它`);
-        }
-        gui.click(r.picked.cx, r.picked.cy);
-        return ok({ clicked: r.picked.text, at: [r.picked.cx, r.picked.cy], confidence: r.picked.conf, total: r.total });
-      }
-
       case 'minimax_new_task': {
         // 1. 优先走 CDP 高速 DOM 切换（免前台唤醒、免 OCR 轮询，亚 50ms 触发）
         if (await cdp.isAvailable()) {
@@ -786,118 +676,6 @@ async function dispatch(name, args = {}, ctx = null) {
         });
       }
 
-      case 'minimax_open_session': {
-        const sid = db.resolveSession(args.session || args.sessionId);
-        if (!sid) return fail(`找不到会话: ${args.session || args.sessionId}`);
-
-        // 1. 优先走 CDP 侧栏高速 DOM 匹配与点击（免 OCR、免 sleep、亚 50ms 切换）
-        if (await cdp.isAvailable() && (args.at === undefined || args.at === null)) {
-          try {
-            const meta = db.sessionMeta(sid);
-            const candidates = [meta?.title, meta?.firstUserMessage]
-              .map((s) => String(s || '').trim())
-              .filter((s) => s.length >= 2);
-
-            const r = await cdp.evaluate(`
-              (() => {
-                const cands = ${JSON.stringify(candidates)}.map(s => s.toLowerCase());
-                if (!cands.length) return null;
-                const spans = Array.from(document.querySelectorAll('span, div, button, a')).filter(el => {
-                  if (el.children.length > 0) return false;
-                  const t = (el.innerText || '').trim().toLowerCase();
-                  if (!t) return false;
-                  return cands.some(c => t.includes(c.slice(0, 10)) || c.includes(t.slice(0, 10)));
-                });
-                for (const el of spans) {
-                  const rect = el.getBoundingClientRect();
-                  if (rect.left < 360 && rect.width > 0 && rect.height > 0) {
-                    const clickable = el.closest('button, [role="button"], a, div[tabindex], div[class*="item"]') || el.parentElement || el;
-                    clickable.click();
-                    return { ok: true, text: el.innerText.trim(), tag: clickable.tagName };
-                  }
-                }
-                return null;
-              })()
-            `);
-            if (r && r.ok) {
-              return ok({
-                opened: true,
-                sessionId: sid,
-                via: 'cdp',
-                matchedText: r.text,
-                note: '已通过 CDP 侧栏 DOM 直连切换会话',
-              });
-            }
-            return ok({
-              opened: false,
-              sessionId: sid,
-              tried: candidates,
-              via: 'cdp',
-              hint: '侧栏 DOM 中未找到该标题（可能被折叠、处于未激活分组或尚未在界面渲染）。',
-            });
-          } catch (_) {}
-        }
-
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        const win = gui.mainWindow();
-        if (!win) return fail('找不到 MiniMax 窗口');
-
-        // 显式给了坐标就用坐标；否则用会话标题去**左侧栏**里 OCR 找。
-        // 注意：标题在侧栏和主区域顶部都会出现，必须只认左侧那一列，否则会点到顶栏。
-        let target = null;
-        if (args.at !== undefined && args.at !== null) {
-          const p = parseAt(args.at);
-          target = { cx: p.x, cy: p.y, text: '(手动坐标)' };
-        } else {
-          const meta = db.sessionMeta(sid);
-          const candidates = [meta?.title, meta?.firstUserMessage]
-            .map((s) => String(s || '').trim())
-            .filter((s) => s.length >= 2);
-          if (!candidates.length) {
-            return fail('这个会话没有标题可用于定位，请用 at 给出侧栏坐标');
-          }
-          // 标题在侧栏和主区域顶部都会出现，取**最靠左那一列**的命中（侧栏就是最左列）
-          for (const c of candidates) {
-            for (const q of [c.slice(0, 14), c.slice(0, 8)]) {
-              const r = ocr.find(q, {
-                region: { x: win.x, y: win.y, width: win.width, height: win.height },
-                refresh: true,
-                mode: 'contains',
-                limit: 20,
-              });
-              if (!r.matches.length) continue;
-              const picked = ocr.pickLeftmostColumn(r.matches);
-              if (!picked) continue;
-              target = { ...picked, matchedBy: q, alternatives: r.matches.length };
-              break;
-            }
-            if (target) break;
-          }
-          if (!target) {
-            return ok({
-              opened: false,
-              sessionId: sid,
-              tried: candidates,
-              hint: '侧栏里没找到这个标题（可能被滚动到视野外，或标题被截断）。用 minimax_screenshot 看侧栏，或用 at:"x,y" 指定坐标。',
-            });
-          }
-        }
-
-        const overlay = blockedByOverlay(target.cx, target.cy);
-        if (overlay) {
-          return fail(`目标位置被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}`);
-        }
-        gui.click(target.cx, target.cy);
-        gui.sleep(1200);
-        return ok({
-          opened: true,
-          sessionId: sid,
-          clicked: [target.cx, target.cy],
-          matchedText: target.text,
-          note: '点完了。要确认切对了，用 minimax_read_session 看这个会话的末尾是否与界面一致。',
-        });
-      }
-
       case 'minimax_stop_generation': {
         // 1. 优先走 CDP 零权限高速终止（直接点击停止按钮或派发 Escape 事件）
         if (await cdp.isAvailable()) {
@@ -924,38 +702,51 @@ async function dispatch(name, args = {}, ctx = null) {
         return ok({ stopped: true, via: 'escape' });
       }
 
-      case 'minimax_key': {
-        // 1. 优先走 CDP 零权限高速键盘派发 (亚 10ms，免 macOS 辅助功能权限与等待)
-        if (await cdp.isAvailable()) {
-          try {
-            const r = await cdp.dispatchKey(args.key, args.modifiers || []);
-            if (r && r.ok) return ok(r);
-          } catch (_) {}
-        }
-
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        return ok(gui.pressKey(args.key, args.modifiers || []));
+      case 'minimax_bot_roster': {
+        const { botClient } = require('../gateway/bot');
+        const roster = botClient.getRoster();
+        return ok(roster);
       }
 
       case 'minimax_bot_message': {
         const { botClient } = require('../gateway/bot');
-        const chatId = args.chatId || 'group:grp_d631733f2e13';
+        const targetArg = args.target || args.chatId;
+        const resolved = botClient.resolveTarget(targetArg, args.mode || 'direct');
         const action = args.action || (args.text ? 'send' : 'read');
+
         if (action === 'read') {
-          const res = await botClient.listMessages(chatId, args.limit || 20);
-          return ok(res);
+          const res = await botClient.listMessages(resolved.chatId, args.limit || 20);
+          return ok({ target: resolved, ...res });
         }
+
+        if (!args.text) return fail('action=send 时 text 不能为空');
+        const sendText = resolved.prefix ? `${resolved.prefix}${args.text}` : args.text;
+        const res = await botClient.sendMessage(resolved.chatId, sendText);
+        return ok({ target: resolved, text: sendText, ...res });
+      }
+
+      case 'minimax_bot_turn': {
+        const { botClient } = require('../gateway/bot');
+        const targetArg = args.target || args.chatId;
+        const resolved = botClient.resolveTarget(targetArg, 'direct');
+        const action = args.action;
+
         if (action === 'cancel') {
-          const res = await botClient.cancelTurn(chatId);
-          return ok(res);
+          const res = await botClient.cancelTurn(resolved.chatId);
+          return ok({ target: resolved, action, ...res });
         }
         if (action === 'resume_pending') {
-          const res = await botClient.resumePending(chatId);
-          return ok(res);
+          const res = await botClient.resumePending(resolved.chatId);
+          return ok({ target: resolved, action, ...res });
         }
-        if (!args.text) return fail('action=send 时 text 不能为空');
-        const res = await botClient.sendMessage(chatId, args.text);
-        return ok(res);
+        if (action === 'answer') {
+          if (!args.messageId || !args.answers) {
+            return fail('action=answer 时 messageId 和 answers 均不能为空');
+          }
+          const res = await botClient.answerQuestion(resolved.chatId, args.messageId, args.answers);
+          return ok({ target: resolved, action, ...res });
+        }
+        return fail(`未知 Bot 轮次动作: ${action}`);
       }
 
       case 'minimax_auto_resume': {
@@ -983,20 +774,21 @@ async function callTool(name, args = {}, ctx = null) {
 
   // 入参别名按工具精准归一化：抹平不同大模型（Claude/Gemini/GPT/开源模型）命名习惯差异，且不污染其他工具
   if (args && typeof args === 'object') {
-    if (name === 'minimax_read_session') {
+    if (name === 'minimax_read_session' || name === 'minimax_get_result' || name === 'minimax_stop_generation') {
       if (args.sessionId && !args.session) args.session = args.sessionId;
-    } else if (name === 'minimax_open_session' || name === 'minimax_get_result' || name === 'minimax_stop_generation') {
       if (args.session && !args.sessionId) args.sessionId = args.session;
     } else if (name === 'minimax_send_message') {
       if (args.text && !args.message) args.message = args.text;
       if (args.content && !args.message) args.message = args.content;
+      if (args.session && !args.sessionId) args.sessionId = args.session;
     } else if (name === 'minimax_search') {
       if (args.q && !args.query) args.query = args.q;
       if (args.keyword && !args.query) args.query = args.keyword;
     } else if (name === 'minimax_draft_answer' || name === 'minimax_answer_question') {
       if (args.id && !args.requestId) args.requestId = args.id;
-    } else if (name === 'minimax_find_text' || name === 'minimax_click_text') {
-      if (args.query && !args.text) args.text = args.query;
+    } else if (name === 'minimax_bot_message' || name === 'minimax_bot_turn') {
+      if (args.chatId && !args.target) args.target = args.chatId;
+      if (args.target && !args.chatId) args.chatId = args.target;
     }
   }
 

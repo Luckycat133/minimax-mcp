@@ -165,7 +165,7 @@ function payload(res) {
 
   await check('类型错误被拒绝且提示类型', async () => {
   const { callTool } = require(path.join(ROOT, 'src/mcp/handler'));
-  const res = await callTool('minimax_click', { x: 'abc', y: 1 });
+  const res = await callTool('minimax_screenshot', { x: 'abc', y: 1 });
   assert.strictEqual(res.isError, true);
   assert.ok(/类型应为 number/.test(payload(res).error));
 });

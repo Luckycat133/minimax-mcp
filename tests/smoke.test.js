@@ -167,57 +167,34 @@ function main() {
     record('get_result 可收回结果', grOk, grDetail);
 
     // OCR：找一段绝不存在的文字，必须是 0 命中且不报错（不能瞎给一个坐标）
-    const nf = await send('tools/call', {
-      name: 'minimax_find_text',
-      arguments: { text: 'zzz-绝对不存在的文字-qqq', refresh: true },
-    });
-    let nfOk = nf.result?.isError !== true;
-    let nfDetail = '';
-    if (nfOk) {
-      const parsed = JSON.parse(nf.result.content[0].text);
-      nfOk = parsed.total === 0 && parsed.picked === null && parsed.scanned > 0;
-      nfDetail = `扫了 ${parsed.scanned} 段，0 命中`;
+    // Bot Studio：名册查询
+    const rosterRes = await send('tools/call', { name: 'minimax_bot_roster', arguments: {} });
+    let rosterOk = rosterRes.result?.isError !== true;
+    let rosterDetail = '';
+    if (rosterOk) {
+      const parsed = JSON.parse(rosterRes.result.content[0].text);
+      rosterOk = Array.isArray(parsed.groups) && Array.isArray(parsed.bots) && parsed.totalBots >= 1;
+      rosterDetail = `${parsed.totalGroups} 个群聊 / ${parsed.totalBots} 个专家 Bot`;
     } else {
-      nfDetail = nf.result?.content?.[0]?.text?.slice(0, 120) || 'error';
+      rosterDetail = rosterRes.result?.content?.[0]?.text?.slice(0, 90) || 'error';
     }
-    record('find_text 找不到时不瞎给坐标', nfOk, nfDetail);
+    record('bot_roster 返回完整架构与名册', rosterOk, rosterDetail);
 
-    // OCR：先用 ocr 模块自己扫一遍窗口，拿一段真实存在的文字再查回去。
-    // 不要写死"新建任务"这种文案——侧栏滚动或窗口换状态就没了，测试会假红。
-    let ftOk = false;
-    let ftDetail = '';
-    try {
-      const ocr = require(path.join(__dirname, '..', 'src/gateway/ocr'));
-      const gui = require(path.join(__dirname, '..', 'src/gateway/gui'));
-      const win = gui.mainWindow();
-      const region = win ? { x: win.x, y: win.y, width: win.width, height: win.height } : null;
-      const shot = ocr.read(region);
-      const sample = (shot.items || []).find((it) => (it.conf || 0) >= 0.7 && it.text && /^[a-zA-Z0-9\u4e00-\u9fa5]{2,10}$/.test(it.text.trim()))
-        || (shot.items || []).find((it) => it.text && it.text.trim().length >= 2);
-      if (!sample) {
-        ftDetail = '窗口里没扫到任何文字（可能被遮挡）';
-      } else {
-        const queryText = sample.text.trim().replace(/^[^a-zA-Z0-9\u4e00-\u9fa5]+/, '').slice(0, 8);
-        const back = await send('tools/call', {
-          name: 'minimax_find_text',
-          arguments: { text: queryText || sample.text.trim(), region, refresh: true },
-        });
-        const parsed = JSON.parse(back.result.content[0].text);
-        ftOk = parsed.total >= 1 && typeof parsed.picked?.cx === 'number';
-        ftDetail = `反查「${queryText || sample.text.trim()}」命中 ${parsed.total} 个`;
-      }
-    } catch (err) {
-      ftDetail = String(err.message).slice(0, 100);
-    }
-    record('find_text 能定位真实控件', ftOk, ftDetail);
-
-    // click_text：目标不存在时必须报错且不点击
-    const ct = await send('tools/call', {
-      name: 'minimax_click_text',
-      arguments: { text: 'zzz-绝对不存在的按钮-qqq' },
+    // Bot 沟通：目标名称解析与消息读取（容灾走磁盘/直连）
+    const bmRes = await send('tools/call', {
+      name: 'minimax_bot_message',
+      arguments: { target: '剪辑师', action: 'read', limit: 5 },
     });
-    record('click_text 找不到就拒绝点击', ct.result?.isError === true,
-      ct.result?.content?.[0]?.text?.slice(0, 90) || '竟然点了');
+    let bmOk = bmRes.result?.isError !== true;
+    let bmDetail = '';
+    if (bmOk) {
+      const parsed = JSON.parse(bmRes.result.content[0].text);
+      bmOk = parsed.target && parsed.target.name === '剪辑师' && Array.isArray(parsed.messages);
+      bmDetail = `成功解析「${parsed.target?.name}」会话，返回 ${parsed.messages?.length} 条消息 (来源: ${parsed.source})`;
+    } else {
+      bmDetail = bmRes.result?.content?.[0]?.text?.slice(0, 90) || 'error';
+    }
+    record('bot_message 中文别名解析与读消息', bmOk, bmDetail);
 
     // brief：必须是"注意力队列"形态，不是平铺列表
     const br = await send('tools/call', { name: 'minimax_brief', arguments: { limit: 50 } });

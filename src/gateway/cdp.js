@@ -257,6 +257,61 @@ class MiniMaxCDPDriver {
   }
 
   /**
+   * Switch active session in MiniMax UI via Mavis Session Store / DOM.
+   */
+  async switchSession(sessionId) {
+    if (!sessionId) throw new Error('sessionId 不能为空');
+    const escaped = JSON.stringify(sessionId);
+    const script = `
+      (() => {
+        try {
+          const store = window.__MAVIS_SESSION_STORE__;
+          if (store && store.getState && store.getState().setActiveSession) {
+            store.getState().setActiveSession(${escaped});
+            return { ok: true, active: store.getState().activeSessionId, via: 'store' };
+          }
+          // DOM fallback: find sidebar item
+          const items = Array.from(document.querySelectorAll('.mavis-sidebar-item, button, [role="button"]'));
+          const item = items.find(el => (el.getAttribute('data-session-id') === ${escaped}) || (el.innerText && el.innerText.includes(${escaped})));
+          if (item) {
+            item.click();
+            return { ok: true, via: 'dom-click' };
+          }
+          return { ok: false, error: 'session store not found' };
+        } catch (e) {
+          return { ok: false, error: e.message };
+        }
+      })()
+    `;
+    return await this.evaluate(script);
+  }
+
+  /**
+   * Create and switch to a new task session.
+   */
+  async newTask() {
+    const script = `
+      (() => {
+        try {
+          const store = window.__MAVIS_SESSION_STORE__;
+          if (store && store.getState && store.getState().clearActiveSession) {
+            store.getState().clearActiveSession();
+          }
+          const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText && b.innerText.includes('新建任务'));
+          if (btn) {
+            btn.click();
+            return { ok: true, via: 'new-task-button' };
+          }
+          return { ok: true, via: 'clear-session' };
+        } catch (e) {
+          return { ok: false, error: e.message };
+        }
+      })()
+    `;
+    return await this.evaluate(script);
+  }
+
+  /**
    * Click send button or trigger Cmd+Enter in editor.
    */
   async sendMessage(text = null) {

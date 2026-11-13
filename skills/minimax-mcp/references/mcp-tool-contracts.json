@@ -113,49 +113,18 @@
     },
     {
       "name": "minimax_send_message",
-      "intent": "往当前会话输入指令",
+      "intent": "向指定或当前会话发送指令。全代码内建自动化：指定 sessionId 自动切换；newSession=true 自动开新任务；自动注入并点击发送。外部 Agent 无需接触任何 UI 坐标。",
       "input": {
-        "message": "string（必填）",
+        "message": "string (必需)",
+        "sessionId": "string (可选，目标会话 ID)",
+        "newSession": "boolean, 默认 false",
         "send": "boolean, 默认 false",
-        "at": "\"x,y\"，可选",
-        "layout": "chat | newtask, 默认 chat",
-        "quietSeconds": "integer, 默认 300；当前会话多久没活动才允许发送，0=不检查",
-        "force": "boolean, 默认 false；跳过活跃守卫",
-        "preview": "boolean, 默认 false；只预览不动作"
+        "quietSeconds": "integer, 默认 300",
+        "force": "boolean, 默认 false",
+        "preview": "boolean, 默认 false"
       },
-      "output": "sent, verified, sessionId, messageId | warning | preview{inputAt,overlay,busySessions,guard}",
-      "sideEffects": "剪贴板、键鼠；send=true 时真的发送。preview=true 时无副作用"
-    },
-    {
-      "name": "minimax_click",
-      "intent": "点击坐标",
-      "input": {
-        "x": "number（必填）",
-        "y": "number（必填）",
-        "button": "left | right"
-      },
-      "output": "clicked, button",
-      "sideEffects": "鼠标点击"
-    },
-    {
-      "name": "minimax_type",
-      "intent": "在焦点处输入文本",
-      "input": {
-        "text": "string（必填）",
-        "force": "boolean, 默认 false；跳过活跃守卫"
-      },
-      "output": "typed",
-      "sideEffects": "键盘输入"
-    },
-    {
-      "name": "minimax_key",
-      "intent": "按键",
-      "input": {
-        "key": "string（必填）",
-        "modifiers": "string[]"
-      },
-      "output": "key, modifiers",
-      "sideEffects": "键盘"
+      "output": "sent, verified, sessionId, messageId, via",
+      "sideEffects": "send=true 会在会话中产生真实用户消息并触发 Agent 执行"
     },
     {
       "name": "minimax_get_result",
@@ -167,13 +136,6 @@
       },
       "output": "done, sessionId, waitedSeconds, lastAssistantMessageId, result",
       "sideEffects": "none（只读轮询）"
-    },
-    {
-      "name": "minimax_stop_generation",
-      "intent": "停止当前这轮生成",
-      "input": {},
-      "output": "stopped, via",
-      "sideEffects": "按 Esc 键"
     },
     {
       "name": "minimax_draft_answer",
@@ -205,39 +167,11 @@
       "sideEffects": "按键；可能开出新窗口"
     },
     {
-      "name": "minimax_open_session",
-      "intent": "切换到某个会话（默认按标题在侧栏 OCR 定位）",
-      "input": {
-        "session": "string（必填）",
-        "at": "\"x,y\"，可选；给了就不做 OCR"
-      },
-      "output": "opened, sessionId, clicked[x,y], matchedText | opened:false + tried + hint",
-      "sideEffects": "鼠标点击一次（只在找到目标时）"
-    },
-    {
-      "name": "minimax_find_text",
-      "intent": "按文字在屏幕上定位元素，返回屏幕点坐标（macOS Vision OCR）",
-      "input": {
-        "text": "string（必填）",
-        "mode": "contains|exact|prefix, 默认 contains",
-        "index": "integer, 默认 0",
-        "region": "可选 {x,y,width,height}",
-        "refresh": "boolean, 默认 true"
-      },
-      "output": "query, total, picked{cx,cy,text,conf}, matches[], scanned, region",
-      "sideEffects": "none（只截屏识别，不点不动）"
-    },
-    {
-      "name": "minimax_click_text",
-      "intent": "找到屏幕上的某段文字并点它的中心",
-      "input": {
-        "text": "string（必填）",
-        "mode": "contains|exact|prefix, 默认 contains",
-        "index": "integer, 默认 0",
-        "region": "可选 {x,y,width,height}"
-      },
-      "output": "clicked, at[x,y], confidence, total",
-      "sideEffects": "鼠标点击一次；有遮挡检查"
+      "name": "minimax_stop_generation",
+      "intent": "停止当前这轮生成",
+      "input": {},
+      "output": "stopped, via",
+      "sideEffects": "按 Esc 键"
     },
     {
       "name": "minimax_watch",
@@ -263,16 +197,36 @@
       "sideEffects": "none（纯读文件）"
     },
     {
+      "name": "minimax_bot_roster",
+      "intent": "获取 MiniMax Bot 团队架构与名册（群聊流水线、成员角色、工具与对应底层会话）。",
+      "input": {},
+      "output": "groups[], bots[], totalGroups, totalBots, version",
+      "sideEffects": "none（纯读本地架构状态）"
+    },
+    {
       "name": "minimax_bot_message",
-      "intent": "与 MiniMax Bot 团队沟通：向指定群聊或 Bot 发送指令，或读取团队最新对话",
+      "intent": "与 MiniMax Bot 团队沟通：向指定群聊或成员 Bot 发送指令，或读取团队最新对话。支持中文名智能解析（如「剪辑师」、「导演」、「幸喵剪辑室」）。",
       "input": {
-        "chatId": "string, 默认 group:grp_d631733f2e13",
-        "text": "string, 消息内容",
-        "limit": "integer, 默认 20",
-        "action": "send|read|cancel|resume_pending, 默认 send"
+        "target": "string (可选，Bot名/群名/ID)",
+        "text": "string (可选，待发送文本)",
+        "mode": "string, enum [direct, group], 默认 direct",
+        "action": "string, enum [send, read]",
+        "limit": "integer, 默认 20"
       },
-      "output": "message | messages[] | {ok: true}",
-      "sideEffects": "action=send 会向 Bot 或群聊发送消息"
+      "output": "target, source, messages[] (read时) 或发送回执 (send时)",
+      "sideEffects": "action=send 会在 Bot 对话中发送消息并触发发言"
+    },
+    {
+      "name": "minimax_bot_turn",
+      "intent": "MiniMax Bot 团队轮次与卡片管控：取消正在执行的轮次、恢复待处理消息或提交问卷卡片答复。",
+      "input": {
+        "target": "string (可选，Bot名或群名)",
+        "action": "string, enum [cancel, resume_pending, answer] (必需)",
+        "messageId": "string (action=answer 时必需)",
+        "answers": "object (action=answer 时必需)"
+      },
+      "output": "target, action, 执行回执",
+      "sideEffects": "会改变 Bot 轮次状态或提交卡片答案"
     },
     {
       "name": "minimax_auto_resume",

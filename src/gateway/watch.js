@@ -521,7 +521,8 @@ async function tick(opts = {}) {
             actions.push({
               tool: 'minimax_auto_resume',
               args: { sessionId: item.sessionId },
-              ok: Boolean(item.ok),
+              planned: dryRun ? true : undefined,
+              ok: dryRun ? undefined : Boolean(item.ok),
               why: '额度恢复后自动断点续传',
             });
           }

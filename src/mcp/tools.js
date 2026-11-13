@@ -1,8 +1,11 @@
 'use strict';
 
 /**
- * tools.js — MiniMax MCP 工具定义（Lean Token & Universal Agent 优化版）。
- * 遵循 MCP 2024-11-05 规范，精炼描述以最小化上下文消耗，高层抽象以兼容任意纯文本/多模态 Agent。
+ * tools.js — MiniMax MCP 工具定义（Lean Token, Target-First & Agent Harness 规范版）。
+ * 遵循 MCP 2024-11-05 规范：
+ * 1. 彻底剔除底层低级 UI 模拟工具 (click/type/key/find_text/click_text/open_session)；
+ * 2. 界面点击与会话切换全部收敛于底层代码全自动执行，外部 Agent 零坐标接触；
+ * 3. 一级支持 MiniMax 双会话体系：工作区通用 Agent (Native Harness) 与 专业 Bot 团队 (Bot Studio)。
  */
 
 const TOOLS = [
@@ -22,12 +25,12 @@ const TOOLS = [
   },
   {
     name: 'minimax_status',
-    description: '获取 MiniMax Code 本地状态：数据库连接、会话数、消息总数及后台任务。',
+    description: '获取 MiniMax Code 本地状态：包含客户端连通性、CDP端口、额度重置精确时间、数据库及 Bot 团队状态。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'minimax_list_sessions',
-    description: '列出 MiniMax 会话列表，按最后活跃时间倒序，返回会话 ID 及序号。',
+    description: '列出 MiniMax 原生工作区会话列表，按最后活跃时间倒序，返回会话 ID 及序号。',
     inputSchema: {
       type: 'object',
       properties: { limit: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: '返回条数' } },
@@ -36,7 +39,7 @@ const TOOLS = [
   },
   {
     name: 'minimax_read_session',
-    description: '读取指定会话的历史消息。session 支持会话 ID (mvs_*) 或列表序号。',
+    description: '读取指定原生会话的历史消息。session 支持会话 ID (mvs_*) 或列表序号。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -95,7 +98,7 @@ const TOOLS = [
   },
   {
     name: 'minimax_windows',
-    description: '获取 MiniMax 窗口坐标与布局信息，用于坐标校验与置顶检查。',
+    description: '获取 MiniMax 窗口坐标与布局信息，用于置顶与运行环境检查。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -128,60 +131,23 @@ const TOOLS = [
   },
   {
     name: 'minimax_send_message',
-    description: '向当前会话输入或发送消息。CDP直连无需坐标；send=true触发发送；带活跃防误触守卫。',
+    description: '向指定或当前 Agent 会话发送指令。全代码内建自动化：指定 sessionId 自动切换；newSession=true 自动开新任务；自动注入并点击发送。外部 Agent 无需接触任何 UI 坐标。',
     inputSchema: {
       type: 'object',
       properties: {
-        message: { type: 'string', description: '待发送文本' },
-        text: { type: 'string', description: '待发送文本别名 (同 message)' },
-        content: { type: 'string', description: '待发送文本别名 (同 message)' },
-        send: { type: 'boolean', default: false, description: 'true=发送, false=仅填入' },
-        at: { type: 'string', description: '可选坐标\"x,y\"(CDP模式自动定位)' },
-        layout: { type: 'string', enum: ['chat', 'newtask'], default: 'chat' },
+        message: { type: 'string', description: '待发送指令或提示词' },
+        text: { type: 'string', description: '待发送指令别名 (同 message)' },
+        content: { type: 'string', description: '待发送指令别名 (同 message)' },
+        sessionId: { type: 'string', description: '目标会话 ID (指定则后台代码自动切换至该会话)' },
+        session: { type: 'string', description: '目标会话 ID 别名 (同 sessionId)' },
+        newSession: { type: 'boolean', default: false, description: 'true=自动创建并切换至新任务会话' },
+        send: { type: 'boolean', default: false, description: 'true=触发发送执行, false=仅填入待确认' },
+        at: { type: 'string', description: '可选坐标"x,y"(备用或调试)' },
         quietSeconds: { type: 'integer', minimum: 0, default: 300, description: '静默保护阈值(秒)' },
         force: { type: 'boolean', default: false, description: 'true=跳过活跃守卫强制发送' },
         preview: { type: 'boolean', default: false, description: 'true=仅预览目标状态不修改' },
       },
       required: ['message'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'minimax_click',
-    description: '向屏幕绝对坐标派发鼠标点击事件(仅在非CDP备选模式下使用)。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        x: { type: 'number' }, y: { type: 'number' },
-        button: { type: 'string', enum: ['left', 'right'], default: 'left' },
-      },
-      required: ['x', 'y'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'minimax_type',
-    description: '向当前富文本输入框注入文本。优先CDP直连，无需前台置顶。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: '待输入字符串' },
-        force: { type: 'boolean', default: false, description: 'true=跳过活跃守卫' },
-      },
-      required: ['text'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'minimax_key',
-    description: '派发键盘单键或快捷键组合(如 Return、cmd+n)。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        key: { type: 'string', description: '按键名(如 return, escape, a)' },
-        modifiers: { type: 'array', items: { type: 'string' }, default: [], description: '修饰键(cmd, shift等)' },
-      },
-      required: ['key'],
       additionalProperties: false,
     },
   },
@@ -214,7 +180,7 @@ const TOOLS = [
   },
   {
     name: 'minimax_answer_question',
-    description: '提交问卷回答。默认 preview=true 仅预览点击计划；preview=false 且 force=true 才实际提交。',
+    description: '提交问卷回答。代码内部全自动派发 DOM 点击；默认 preview=true 仅预览方案；preview=false 且 force=true 实际提交。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -233,7 +199,6 @@ const TOOLS = [
         },
         preview: { type: 'boolean', default: true },
         force: { type: 'boolean', default: false },
-        at: { type: 'string', description: '首选项坐标(可选)' },
       },
       required: ['requestId'],
       additionalProperties: false,
@@ -241,21 +206,8 @@ const TOOLS = [
   },
   {
     name: 'minimax_new_task',
-    description: '新建任务。优先通过 CDP DOM 触发或快捷键切换至新建任务视图。',
+    description: '新建任务。通过 CDP 高速切换至新建任务视图。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'minimax_open_session',
-    description: '在 MiniMax 界面中导航至指定会话(支持侧栏匹配与 DeepLink)。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        sessionId: { type: 'string', description: '目标会话 ID' },
-        session: { type: 'string', description: '目标会话 ID 别名 (同 sessionId)' },
-      },
-      required: ['sessionId'],
-      additionalProperties: false,
-    },
   },
   {
     name: 'minimax_stop_generation',
@@ -317,65 +269,39 @@ const TOOLS = [
     },
   },
   {
-    name: 'minimax_find_text',
-    description: '在界面中查找文本元素并返回坐标(优先CDP DOM，自动回退OCR)。只读。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: '匹配文本' },
-        query: { type: 'string', description: '匹配文本别名 (同 text)' },
-        mode: { type: 'string', enum: ['contains', 'exact', 'prefix'], default: 'contains' },
-        index: { type: 'integer', minimum: 0, default: 0 },
-        region: {
-          type: 'object',
-          properties: {
-            x: { type: 'number' }, y: { type: 'number' },
-            width: { type: 'number' }, height: { type: 'number' },
-          },
-          required: ['x', 'y', 'width', 'height'],
-          additionalProperties: false,
-        },
-        refresh: { type: 'boolean', default: true },
-      },
-      required: ['text'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'minimax_click_text',
-    description: '查找并点击指定文本(按钮/菜单项)。优先走 CDP DOM 直连，无视窗口遮挡与缩放。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: '目标按钮或文字' },
-        query: { type: 'string', description: '目标按钮或文字别名 (同 text)' },
-        mode: { type: 'string', enum: ['contains', 'exact', 'prefix'], default: 'contains' },
-        index: { type: 'integer', minimum: 0, default: 0 },
-        region: {
-          type: 'object',
-          properties: {
-            x: { type: 'number' }, y: { type: 'number' },
-            width: { type: 'number' }, height: { type: 'number' },
-          },
-          required: ['x', 'y', 'width', 'height'],
-          additionalProperties: false,
-        },
-      },
-      required: ['text'],
-      additionalProperties: false,
-    },
+    name: 'minimax_bot_roster',
+    description: '获取 MiniMax Bot 团队架构与名册（群聊流水线、成员角色、工具与对应底层会话）。零开销只读。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'minimax_bot_message',
-    description: '与 MiniMax Bot 团队沟通：向指定群聊或 Bot 发送指令，或读取团队最新对话。',
+    description: '与 MiniMax Bot 团队沟通：向指定群聊或成员 Bot 发送指令，或读取团队最新对话。支持中文名智能解析（如「剪辑师」、「导演」、「幸喵剪辑室」）。',
     inputSchema: {
       type: 'object',
       properties: {
-        chatId: { type: 'string', default: 'group:grp_d631733f2e13', description: '群聊或 Bot ID (如 group:grp_... 或 bot:bot_...)' },
-        text: { type: 'string', description: '发送的文本内容' },
+        target: { type: 'string', description: '目标名称或 ID（如「剪辑师」、「导演」、「幸喵剪辑室」、「bot:bot_...」、「group:grp_...」）' },
+        chatId: { type: 'string', description: '目标会话 ID 别名 (同 target)' },
+        text: { type: 'string', description: '发送的文本指令' },
+        mode: { type: 'string', enum: ['direct', 'group'], default: 'direct', description: '目标为成员 Bot 时：direct=1对1私聊，group=群聊并自动添加 @Bot名' },
+        action: { type: 'string', enum: ['send', 'read'], description: '操作类型 (默认有 text 则 send，无 text 则 read)' },
         limit: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: '读取历史消息数量' },
-        action: { type: 'string', enum: ['send', 'read', 'cancel', 'resume_pending'], default: 'send', description: '操作类型' },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minimax_bot_turn',
+    description: 'MiniMax Bot 团队轮次与卡片管控：取消正在执行的轮次、恢复待处理消息或提交问卷卡片答复。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: '目标 Bot 或群聊名称/ID' },
+        chatId: { type: 'string', description: '目标会话 ID 别名 (同 target)' },
+        action: { type: 'string', enum: ['cancel', 'resume_pending', 'answer'], description: 'cancel=取消正在思考的轮次, resume_pending=恢复未处理消息, answer=提交卡片答案' },
+        messageId: { type: 'string', description: '问卷卡片消息 ID（action=answer 时必填）' },
+        answers: { type: 'object', description: '问卷卡片答案键值对（action=answer 时必填）' },
+      },
+      required: ['action'],
       additionalProperties: false,
     },
   },
