@@ -59,7 +59,7 @@ function main() {
 
     const list = await send('tools/list', {});
     const tools = list.result?.tools || [];
-    record('tools/list', tools.length === 11, `${tools.length} 个工具 (精简为 11 层级架构)`);
+    record('tools/list', tools.length === 5, `${tools.length} 个核心领域工具`);
 
     // 逐个调所有只读工具与层级入口。用真实参数，确保不只是"能返回错误"。
     const readOnlyCalls = [

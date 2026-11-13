@@ -16,6 +16,25 @@ const tasks = require('./tasks');
 let tasksEnabled = false;
 /** 轮询器只能起一个，客户端重复发 initialized 不该叠加定时器。 */
 let pollerStarted = false;
+let daemonStarted = false;
+
+/**
+ * 网关后台自愈守护进程：自动监控额度刷新与队列状态，并在额度恢复后自动断点续传。
+ * 纯后台代码静默执行，无需外部 AI 触发。
+ */
+function startGatewayDaemon() {
+  if (daemonStarted) return;
+  daemonStarted = true;
+  const tick = async () => {
+    try {
+      const { autoResume } = require('../gateway/resume');
+      await autoResume({ dryRun: false, limit: 3 });
+    } catch (_) {}
+  };
+  setTimeout(tick, 2000).unref();
+  const timer = setInterval(tick, 30000);
+  timer.unref();
+}
 
 /**
  * 立刻把通知写到 stdout。
@@ -113,6 +132,7 @@ async function handle(message, ctx = CTX) {
   }
 
   if (method === 'notifications/initialized' || method === 'initialized') {
+    startGatewayDaemon();
     if (tasksEnabled) startTaskPoller();
     return null;
   }

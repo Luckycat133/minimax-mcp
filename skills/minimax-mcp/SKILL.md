@@ -4,7 +4,7 @@ description: "Operate, monitor, diagnose, and auto-resume MiniMax Code on macOS 
 license: MIT
 metadata:
   author: minimax-mcp
-  version: "0.4.0"
+  version: "0.5.0"
   openclaw:
     requires:
       bins:
@@ -13,184 +13,130 @@ metadata:
         - sqlite3
 ---
 
-# MiniMax Code MCP 智能体操作最佳实践指南 (Tiered Architecture)
+# MiniMax Code MCP 智能体操作最佳实践指南 (Domain-Driven Core Architecture)
 
-本指南专为 AI Agent（Antigravity、Claude、Cursor 等）设计，指导 Agent 高效、低 Token 消耗、高可靠地调度 `minimax-mcp` 的 **11 项多层触发高阶工具**，接管并自愈本地 MiniMax Code 桌面客户端与其内置的 Agent 执行容器（Agent Harness）。
-
----
-
-## 核心架构原则：渐进式披露与多层触发 (Tiered Progressive Disclosure)
-
-MiniMax Code 不是供外部智能体手工计算坐标模拟点击的网页，而是一个**本地 Agent 执行容器**。`minimax-mcp` 彻底剔除了散落碎片化的底层 UI 工具，采用**二级动作（action）分层触发机制**：
-- **Token 节约 60%+**：工具清单从 27+ 项大幅精简至 11 项，顶层上下文极为清爽；
-- **自适应动作推理**：忘记传 `action` 时，工具会自动根据所传参数智能推断目标动作；
-- **全自动代码闭环**：会话切换、聚焦输入、点击发送、解锁队列全由底层代码在 CDP / DOM / SQLite 层面自动闭环执行，外部 Agent 零物理坐标接触。
+本指南专为 AI Agent（Antigravity、Claude、Cursor 等）设计，指导 Agent 高效、低 Token 消耗、高可靠地调度 `minimax-mcp` 的 **5 项核心领域工具**，无缝对接本地 MiniMax Code 桌面客户端与其内置的 Agent 执行容器（Agent Harness）。
 
 ---
 
-## 双轨对话模型决策树：先选对话类型
+## 核心理念：AI 专注对话与调度，底层全自动守护
 
-MiniMax 内部拥有两个截然不同的对话世界，调度前首先明确目标：
+对外部 AI 而言，操作 MiniMax 的核心需求非常纯粹：
+1. **查看状态与额度**：确认 MiniMax 与 CDP 就绪态，了解剩余额度与刷新倒计时；
+2. **查找与精读对话**：先在本地 SQLite 找会话、翻历史、搜索上下文；
+3. **分对象调度对话**：
+   - 与**原生工作区智能体**对话（在工作区下发任务指令、自动切会话并等待产出）；
+   - 与 **MiniMax Bot 团队**对话（向「剪辑师」「导演」等专家或群聊发指令、读回复）；
+4. **人工卡片与问卷应答**：处理 MiniMax 提出的人工决策卡片。
 
-1. **主工作区通用智能体 (Native Agent Harness)**：
-   - 标识：`mvs_*` 会话 ID（写代码、工程重构、终端执行等）。
-   - 探索：调用 `minimax_session({ action: "list" })` 或 `minimax_session({ action: "read", sessionId: "mvs_..." })`。
-   - 调度：调用 `minimax_agent({ action: "send", sessionId: "mvs_...", message: "...", send: true })` 自动切会话并发送。
-   - 收取：调用 `minimax_agent({ action: "result", sessionId: "mvs_...", timeoutSeconds: 300 })`。
-2. **专业 Bot 团队 (Bot Studio)**：
-   - 标识：群聊流水线与专家 Bot（「导演」、「剪辑师」[操作达芬奇]、「字幕」、「混音」、「包装」、「质检」、「Chief」）。
-   - 名册：调用 `minimax_bot({ action: "roster" })` 查看流水线与专家职责。
-   - 对话：调用 `minimax_bot({ action: "send", target: "剪辑师", text: "..." })` 直接用**中文别名**派发任务。
-   - 管控：调用 `minimax_bot({ action: "cancel", target: "剪辑师" })` 截断卡死轮次。
-
----
-
-## 常用工作流决策树 (Recipes)
-
-### 工作流 1：全局全景体检与自愈
-
-```javascript
-// 1. 获取四维全景状态（App 运行、CDP 连接、额度重置精确秒数、数据库、Bot 团队）
-minimax_status {}
-
-// 2. CDP 离线时自动挂载端口并激活前台：
-// 若 cdp.online === false，一键自愈：
-minimax_desktop { action: "activate", relaunchWithDebug: true }
-
-// 3. 读取高优先级注意力队列（过滤 200+ 沉睡会话，只报等你决定、报错、卡住的任务）
-minimax_brief {}
-```
+> [!IMPORTANT]
+> **断点自动续传（Auto-Resume）与周期巡检完全由网关后台代码全自动静默执行**：
+> 外部 AI 无需调用任何续传工具。网关守护进程会根据 CDP 额度刷新倒计时与本地队列暂停状态，在额度重置后秒级自动解除挂起并恢复执行（原生对话点继续、Bot 对话推进轮次、渠道解除暂停），实现真正的全自动无人值守。
 
 ---
 
-### 工作流 2：MiniMax Bot 团队协同 (minimax_bot 多层触发)
+## 5 大核心工具与智能动作推断
 
-```javascript
-// 1. 获取团队名册与流水线架构（只读，免开销）：
-minimax_bot { action: "roster" }
-// 返回「幸喵剪辑室」流水线：导演 → 剪辑师 → 字幕 → 混音 → 包装 → 质检
-
-// 2. 读历史消息（容灾走磁盘/实时直连）：
-minimax_bot { action: "read", target: "剪辑师", limit: 5 }
-
-// 3. 1对1 私聊派发指令：
-minimax_bot { action: "send", target: "剪辑师", text: "请复核达芬奇时间线上的真峰值", mode: "direct" }
-
-// 4. 群聊点名接力（自动补充 @剪辑师 前缀）：
-minimax_bot { action: "send", target: "剪辑师", text: "请接力剪辑", mode: "group" }
-
-// 5. 轮次管控（取消卡死或恢复挂起）：
-minimax_bot { action: "cancel", target: "剪辑师" }
-minimax_bot { action: "resume", target: "剪辑师" }
-```
+| 工具名称 | 核心职责 | 多层触发动作 (`action`) | 智能动作推断 (可省略 action) |
+|---|---|---|---|
+| `minimax_status` | 查看运行状态、CDP 连接、额度刷新倒计时与注意力概况 | *(只读一体化探针)* | 包含 `app`、`cdp`、`quota` 与 `attention` 摘要 |
+| `minimax_session` | 查找对话、翻阅历史、多会话采样与全文检索 | `list` \| `read` \| `tail` \| `search` | 传 `session`/`sessionId` 自动推断为 `read`；传 `query`/`q` 自动推断为 `search`；传 `count` 自动推断为 `tail`；默认 `list` |
+| `minimax_agent` | 与原生工作区智能体对话（下发任务/获取结果/新建任务/停止） | `send` \| `result` \| `stop` \| `new` | 传 `message`/`text` 自动推断为 `send`；传 `timeoutSeconds` 自动推断为 `result`；自动切会话与激活窗口 |
+| `minimax_bot` | 与 MiniMax Bot 团队协同（流水线名册/发指令/读回复/取消轮次） | `roster` \| `send` \| `read` \| `cancel` \| `resume` \| `answer` | 传 `text` 自动推断为 `send`；传 `target` 自动推断为 `read`；默认 `roster`；支持「剪辑师」「导演」等中文名 |
+| `minimax_questionnaire` | 人工决策卡片与审批管理（待办列表/草稿方案/提交答案） | `list` \| `draft` \| `answer` | 传 `requestId` 自动推断为 `draft`；传 `selections` 自动推断为 `answer`；默认 `list`（待审批队列） |
 
 ---
 
-### 工作流 3：原生工作区 Agent 调度 (minimax_agent & minimax_session)
+## 最佳工作流实践 (Recipes)
 
-```javascript
-// 1. 会话探索与检索：
-minimax_session { action: "list", limit: 10 }
-minimax_session { action: "search", query: "Blender" }
-minimax_session { action: "read", sessionId: "mvs_f9e205532746498192570cef5f9de1d4" }
+### 场景 1：探查状态与额度 (Check Health & Quota)
+外部 Agent 在调度前，先看一次状态：
+```json
+// 调用
+minimax_status({})
 
-// 2. 自动切换会话并派发指令（代码内部自动切会话、注入 TipTap 并点击发送）：
-minimax_agent {
-  action: "send",
-  sessionId: "mvs_f9e205532746498192570cef5f9de1d4",
-  message: "请继续运行第三阶段集成测试",
-  send: true,
-  force: true
+// 返回示例
+{
+  "app": { "running": true, "pid": 12345 },
+  "cdp": { "online": true, "port": 9223 },
+  "quota": {
+    "isLimited": false,
+    "waitSeconds": 0,
+    "countdownText": "正常可用"
+  },
+  "attention": {
+    "headline": "都很安静（24 个会话没有新动静）",
+    "pendingQuestions": 0,
+    "autoResume": { "active": true, "note": "网关后台已就绪：额度刷新后自动解除挂起并续传" }
+  }
 }
+```
 
-// 3. 全自动新建任务：
-minimax_agent {
-  action: "send",
-  newSession: true,
-  message: "分析当前目录并重构冗余模块",
+### 场景 2：先找对话，再向原生智能体下发任务
+外部 Agent 需要让 MiniMax 协助完成工程重构或代码生成：
+```json
+// 步骤 1：找会话
+minimax_session({ action: "search", query: "Blender 立冬" })
+
+// 步骤 2：下发任务（代码会自动切换至该 sessionId，无需人工点选）
+minimax_agent({
+  sessionId: "mvs_xxx",
+  message: "请帮我把这个 Blender 场景中的冰雪材质折射率从 1.31 改为 1.333",
   send: true
-}
+})
 
-// 4. 阻塞等待收取产出（无需手写 bash 轮询）：
-minimax_agent {
+// 步骤 3：等待并收取结果
+minimax_agent({
   action: "result",
-  sessionId: "mvs_f9e205532746498192570cef5f9de1d4",
-  timeoutSeconds: 300
-}
+  sessionId: "mvs_xxx",
+  timeoutSeconds: 120
+})
 ```
 
----
+### 场景 3：与 MiniMax Bot 团队专家协同
+向 Bot Studio 中的特定专家（如达芬奇剪辑师）派发视频剪辑任务：
+```json
+// 步骤 1：查看专家名册与群聊流水线
+minimax_bot({ action: "roster" })
 
-### 工作流 4：额度恢复与断点续传 (minimax_auto_resume)
+// 步骤 2：直接用中文名派发指令（代码自动解析具体 Bot ID 并处理群聊/私聊前缀）
+minimax_bot({
+  target: "剪辑师",
+  text: "请把第 3 个镜头的时间线向右微调 12 帧，并加上交叉溶解转场"
+})
 
-MiniMax 在遇到配额耗尽（`42212` / `2056`）或 Telegram 渠道 Turn 熔断时，会在 SQLite 中插入 `local_runtime_queue_pauses`，导致后续用户输入全部报“本次请求处理失败”。
-
-```javascript
-// 1. 先预览有哪些挂起或阻断的会话（dryRun: true，安全只读）：
-minimax_auto_resume { dryRun: true, limit: 5 }
-
-// 2. 确认额度可用，执行真实批量自愈续传：
-minimax_auto_resume { dryRun: false, limit: 5 }
-// 自动清除 SQLite pause 锁、重置会话、通过 CDP 点击继续按钮。
+// 步骤 3：读取剪辑师回复
+minimax_bot({
+  target: "剪辑师",
+  limit: 5
+})
 ```
 
----
+### 场景 4：处理决策卡片与人工审批
+当 `minimax_status` 报告 `pendingQuestions > 0` 时：
+```json
+// 步骤 1：查看待处理卡片
+minimax_questionnaire({ action: "list" })
 
-### 工作流 5：人工问卷与审批卡片自动化处理 (minimax_questionnaire)
+// 步骤 2：获取问卷推荐草稿方案
+minimax_questionnaire({ action: "draft", requestId: "ask_xxx" })
 
-```javascript
-// 1. 查看当前待处理的审批卡片与提问：
-minimax_questionnaire { action: "list" }
-
-// 2. 读取题目详情与策略推荐草稿：
-minimax_questionnaire { action: "draft", requestId: "ask_bc37658a86a5" }
-
-// 3. 提交选定答案：
-minimax_questionnaire {
+// 步骤 3：确认真实提交（默认 preview:true，确认提交需 preview:false + force:true）
+minimax_questionnaire({
   action: "answer",
-  requestId: "ask_bc37658a86a5",
-  selections: [{ stepId: "step_1", optionIds: ["opt_agree"] }],
+  requestId: "ask_xxx",
   preview: false,
   force: true
-}
+})
 ```
 
 ---
 
-## 11 项精简工具完整矩阵速查
+## 守卫与安全设计
 
-| 工具名称 | 权限级别 | 默认行为 | 多层动作 (Action) 与用途 |
-| :--- | :---: | :---: | :--- |
-| `minimax_brief` | `read` | 只读 | 态势简报，智能体决策首选入口 |
-| `minimax_status` | `read` | 只读 | 探查 App/CDP/配额/数据库/Bot全景 |
-| `minimax_session` | `read` | `list` | 原生会话统一探索：`list`(列出) / `read`(精读) / `tail`(采样) / `search`(全文搜) |
-| `minimax_agent` | `commit` | `send` | 原生智能体调度：`send`(派发) / `result`(结果) / `stop`(终止) / `new`(新建) |
-| `minimax_bot` | `commit` | `roster` | Bot团队协同：`roster`(名册) / `send`(发信) / `read`(读信) / `cancel` / `resume` / `answer` |
-| `minimax_questionnaire` | `commit` | `list` | 问卷与审批卡片：`list`(待办) / `draft`(草稿) / `answer`(提交) |
-| `minimax_desktop` | `ui` | `activate` | 桌面环境控制：`activate`(唤醒/CDP) / `screenshot`(截图) / `windows`(布局) |
-| `minimax_auto_resume` | `commit` | `dryRun: true` | 断点续传与死锁自愈（需传 `dryRun: false`） |
-| `minimax_watch` | `commit` | 依策略执行 | 本地状态比对与低风险代答（后台守卫） |
-| `minimax_events` | `read` | 只读 | 拉取巡检事件日志（支持 `since` 过滤） |
-| `minimax_tasks` | `read` | 只读 | 查看正在运行的后台代码/Shell 任务 |
-
----
-
-## 动作自适应推断表（不传 action 时的智能兜底）
-
-| 工具 | 传入关键参数 | 自动推断的 action |
-| :--- | :--- | :--- |
-| `minimax_session` | 传 `session` 或 `sessionId` | `read` |
-| `minimax_session` | 传 `query` 或 `q` | `search` |
-| `minimax_session` | 传 `count` 或 `perSession` | `tail` |
-| `minimax_session` | 什么都不传 | `list` |
-| `minimax_agent` | 传 `message` 或 `text` | `send` |
-| `minimax_agent` | 传 `timeoutSeconds` 或 `afterMessageId` | `result` |
-| `minimax_bot` | 传 `text` | `send` |
-| `minimax_bot` | 传 `target` 且没传 `text` | `read` |
-| `minimax_bot` | 传 `messageId` 与 `answers` | `answer` |
-| `minimax_bot` | 什么都不传 | `roster` |
-| `minimax_questionnaire` | 传 `selections` 或 `force` | `answer` |
-| `minimax_questionnaire` | 传 `requestId` 或 `id` | `draft` |
-| `minimax_questionnaire` | 什么都不传 | `list` |
-| `minimax_desktop` | 传 `mode` 或 `width` | `screenshot` |
-| `minimax_desktop` | 什么都不传 | `activate` |
+1. **活跃用户守卫（Quiet Guard）**：
+   `minimax_agent` 发送消息前会检测目标会话是否在最近 300 秒内有活动。若人类用户正在打字操作，工具会主动拒绝发送并报错，避免干扰用户正常工作；如需强行推进可显式设置 `force: true`。
+2. **预览优先策略**：
+   所有高风险写入操作（`send`、`answer`）默认均为预览模式（`send: false` 或 `preview: true`），只有明确声明动作参数才会真实提交修改。
+3. **网关静默续传自愈**：
+   即使外部 Agent 离线，网关守护进程依然常驻运行。当触发额度限制错误（2056 或 42212）时，网关守护进程会自动记录挂起会话；一旦额度重置倒计时结束，网关会自动解除挂起继续执行，无需消耗外部 Agent 的 Token。

@@ -26,7 +26,7 @@ const check = async (label, fn) => {
 
 // 不写死数字：工具数只保证"在合理区间"，具体一致性由 glama.json 那条断言盯
 check('工具数在合理区间', () => {
-  assert.ok(TOOLS.length >= 8, `工具数太少: ${TOOLS.length}`);
+  assert.ok(TOOLS.length >= 4, `工具数太少: ${TOOLS.length}`);
   assert.ok(TOOLS.length <= 25, `工具数异常膨胀: ${TOOLS.length}`);
 });
 
@@ -68,7 +68,7 @@ check('危险工具默认不动作', () => {
 });
 
 check('只读工具没有 send/force 这类动作参数', () => {
-  const readOnly = ['minimax_status', 'minimax_brief', 'minimax_session', 'minimax_events', 'minimax_tasks'];
+  const readOnly = ['minimax_status', 'minimax_session'];
   for (const n of readOnly) {
     const t = TOOLS.find((x) => x.name === n);
     assert.ok(t, `缺工具 ${n}`);

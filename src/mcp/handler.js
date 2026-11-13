@@ -20,7 +20,7 @@ const brief = require('../gateway/brief');
 const audit = require('../gateway/audit');
 const ann = require('./annotations');
 const { validateArgs } = require('./validate');
-const { TOOLS } = require('./tools');
+const { ALL_TOOLS } = require('./tools');
 const watch = require('../gateway/watch');
 const tasks = require('./tasks');
 
@@ -114,9 +114,25 @@ async function dispatch(name, args = {}, ctx = null) {
             s.quota = await cdp.getQuotaStatus();
           } catch (_) {}
         } else if (s.app.running) {
-          s.cdp.hint = 'MiniMax 正在运行但未开启 CDP 调试端口 (9223)。可调用 minimax_desktop({ action: "activate", relaunchWithDebug: true }) 挂载调试端口。';
+          s.cdp.hint = 'MiniMax 正在运行但未开启 CDP 调试端口 (9223)。可调用 activate 挂载调试端口。';
         } else {
-          s.cdp.hint = 'MiniMax Code 尚未运行。可调用 minimax_desktop({ action: "activate" }) 启动。';
+          s.cdp.hint = 'MiniMax Code 尚未运行。发送指令时会自动启动。';
+        }
+
+        if (args.includeBrief !== false) {
+          try {
+            const pending = db.pending();
+            const br = brief.brief({ limit: 20 });
+            s.attention = {
+              headline: br.headline,
+              pendingQuestions: pending.length,
+              stalledSessions: (br.items || []).filter((it) => it.kind === 'stalled').length,
+              autoResume: {
+                active: true,
+                note: '网关后台已就绪：额度刷新后自动解除挂起并续传，无需人工触发',
+              },
+            };
+          } catch (_) {}
         }
         return ok(s);
       }
@@ -663,7 +679,7 @@ async function callTool(name, args = {}, ctx = null) {
   }
 
   // 工具 Schema 校验
-  const tool = TOOLS.find((t) => t.name === name);
+  const tool = ALL_TOOLS.find((t) => t.name === name);
   if (tool) {
     const v = validateArgs(tool, args);
     if (!v.ok) {

@@ -1,32 +1,31 @@
 'use strict';
 
 /**
- * tools.js — MiniMax MCP 核心工具定义（多层触发 Tiered Architecture 极致精简版）。
+ * tools.js — MiniMax MCP 核心工具定义（领域驱动极简 5 工具版）。
  *
- * 遵循 MCP 2024-11-05 规范，采用渐进式披露（Progressive Disclosure / Tiered Action）设计：
- * 将高频相关的细粒度工具聚合为 11 项具备二级动作（action）的高阶系统工具，
- * 大幅削减模型上下文中的工具清单体积（Token 减少 60%+），彻底消除模型意图分发时的混淆。
+ * 遵循 MCP 2024-11-05 规范：
+ * 外部 AI 仅需感知 5 项核心能力：
+ * 1. minimax_status: 查看 MiniMax 运行状态、CDP 连接、额度刷新倒计时与注意力概况。
+ * 2. minimax_session: 查找与探索对话历史（先找会话/查历史）。
+ * 3. minimax_agent: 与原生工作区智能体对话（下发任务/自动切会话/获取产出/终止/新建）。
+ * 4. minimax_bot: 与 MiniMax Bot 团队对话（名册流水线架构/向指定专家或群聊发指令/读回复）。
+ * 5. minimax_questionnaire: 人工决策卡片与审批管理（查看待办/草稿方案/提交答案）。
+ *
+ * 注：断点自动续传(auto_resume)、周期巡检守护(watch)、桌面管理等完全由网关后台代码全自动静默执行，
+ * 不暴露给外部 AI，彻底降低调用上下文 Token 开销并杜绝误调用。
  */
 
 const TOOLS = [
   {
-    name: 'minimax_brief',
-    description: '态势快照：按 等你决定>报错>卡住>运行中 优先级输出需关注的会话。纯读数据库，巡检首选。',
+    name: 'minimax_status',
+    description: '查看 MiniMax 运行状态、CDP 9223 端口、Token Plan 额度与刷新倒计时、待审批问卷卡片与注意力队列。',
     inputSchema: {
       type: 'object',
       properties: {
-        stalledMinutes: { type: 'integer', minimum: 1, default: 10, description: '未回复卡住判定阈值(分钟)' },
-        activeMinutes: { type: 'integer', minimum: 1, default: 10, description: '活跃会话判定阈值(分钟)' },
-        finishedMinutes: { type: 'integer', minimum: 1, default: 60, description: '刚完成判定阈值(分钟)' },
-        limit: { type: 'integer', minimum: 1, maximum: 500, default: 200, description: '扫描会话数量' },
+        includeBrief: { type: 'boolean', default: true, description: '是否包含注意力队列摘要' },
       },
       additionalProperties: false,
     },
-  },
-  {
-    name: 'minimax_status',
-    description: '获取 MiniMax Code 本地状态：包含客户端连通性、CDP端口、额度重置精确时间、数据库及 Bot 团队状态。',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'minimax_session',
@@ -137,6 +136,23 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+];
+
+const INTERNAL_TOOLS = [
+  {
+    name: 'minimax_brief',
+    description: '态势快照：按 等你决定>报错>卡住>运行中 优先级输出需关注的会话。纯读数据库，巡检首选。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        stalledMinutes: { type: 'integer', minimum: 1, default: 10, description: '未回复卡住判定阈值(分钟)' },
+        activeMinutes: { type: 'integer', minimum: 1, default: 10, description: '活跃会话判定阈值(分钟)' },
+        finishedMinutes: { type: 'integer', minimum: 1, default: 60, description: '刚完成判定阈值(分钟)' },
+        limit: { type: 'integer', minimum: 1, maximum: 500, default: 200, description: '扫描会话数量' },
+      },
+      additionalProperties: false,
+    },
+  },
   {
     name: 'minimax_desktop',
     description: '桌面客户端前台与显示控制：将窗口唤醒前台并可选挂载 CDP 调试端口(activate)、捕获窗口截图(screenshot)、查询窗口几何坐标与置顶状态(windows)。',
@@ -234,9 +250,12 @@ const TOOLS = [
 ];
 
 const { annotate } = require('./annotations');
-
-// 统一打上 title + MCP annotations
 const ANNOTATED = annotate(TOOLS);
+const ALL_ANNOTATED = annotate([...TOOLS, ...INTERNAL_TOOLS]);
 const TOOL_NAMES = ANNOTATED.map((t) => t.name);
 
-module.exports = { TOOLS: ANNOTATED, TOOL_NAMES };
+module.exports = {
+  TOOLS: ANNOTATED,
+  TOOL_NAMES,
+  ALL_TOOLS: ALL_ANNOTATED,
+};
