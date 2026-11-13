@@ -143,13 +143,15 @@ async function autoResume({ dryRun = true, limit = 5, sessionId = null } = {}) {
     };
   }
 
-  // 额度受限时，若非 dryRun 预览则直接返回阻断原因
+  // 额度受限时，若非 dryRun 预览则直接返回阻断原因及精准唤醒时间
   if (quota.isLimited && !dryRun) {
     cdp.close();
     return {
       ok: false,
       reason: 'quota_exhausted',
       quotaStatus: quota,
+      resetAtMs: quota.resetAtMs || null,
+      waitSeconds: quota.waitSeconds || null,
       candidateSessions: targetSessions.map((s) => ({
         sessionId: s.sessionId,
         title: s.title,
@@ -158,7 +160,7 @@ async function autoResume({ dryRun = true, limit = 5, sessionId = null } = {}) {
         queuedCount: s.queuedCount,
         lastText: s.lastText.slice(0, 80),
       })),
-      message: `Token Plan 额度仍处于受限状态（重置时间：${quota.resetAt || '待定'}）。将在额度恢复后自动继续。`,
+      message: `Token Plan 额度仍处于受限状态（重置时间：${quota.resetAt || '待定'}，预计剩余 ${quota.waitSeconds ? Math.ceil(quota.waitSeconds / 60) + ' 分钟' : '未知'}）。将在额度恢复后精准自动唤醒。`,
     };
   }
 

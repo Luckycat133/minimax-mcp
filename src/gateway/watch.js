@@ -98,6 +98,7 @@ function loadState() {
     const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     return {
       version: 1,
+      ...raw,
       lastTick: raw.lastTick || 0,
       sessions: raw.sessions || {},
       emitted: raw.emitted || {},

@@ -440,13 +440,56 @@ class MiniMaxCDPDriver {
         const buyBtn = document.querySelector("[data-testid*='buy_credits']");
         const upgradeBtn = document.querySelector("[data-testid*='upgrade']");
         const text = banner ? banner.innerText.trim() : "";
-        const mReset = text.match(/将于\\s*([\\d:]+)\\s*重置/);
+        const mReset = text.match(/(?:将于|reset at)\\s*([^\\s,。]+(?:\\s*[\\d:]+)?)\\s*(?:重置|\\.)/i) || text.match(/将于\\s*([\\d:]+)\\s*重置/);
+        
+        // 尝试从 React Fiber 直接获取高精度的 resetAtMs 毫秒时间戳
+        let fiberResetAtMs = null;
+        if (banner) {
+          const fiberKey = Object.keys(banner).find(k => k.startsWith('__reactFiber'));
+          if (fiberKey && banner[fiberKey]) {
+            let curr = banner[fiberKey];
+            let depth = 0;
+            while (curr && depth < 20) {
+              if (curr.memoizedProps && typeof curr.memoizedProps.resetAtMs === 'number') {
+                fiberResetAtMs = curr.memoizedProps.resetAtMs;
+                break;
+              }
+              curr = curr.return;
+              depth++;
+            }
+          }
+        }
+
+        // 若 Fiber 未直接命中，则尝试从文本时间转换精确时间戳
+        let resetAtMs = fiberResetAtMs;
+        const resetAtStr = mReset ? mReset[1] : null;
+        if (!resetAtMs && resetAtStr) {
+          try {
+            if (/^\\d{1,2}:\\d{2}$/.test(resetAtStr)) {
+              const now = new Date();
+              const [h, m] = resetAtStr.split(':').map(Number);
+              const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+              if (target.getTime() < now.getTime() - 60000) {
+                target.setDate(target.getDate() + 1); // 跨天重置
+              }
+              resetAtMs = target.getTime();
+            } else {
+              const parsed = Date.parse(resetAtStr);
+              if (!isNaN(parsed)) resetAtMs = parsed;
+            }
+          } catch {}
+        }
+
         // 关键修复：精确区分"已达到上限"(硬阻断)与"即将达到上限"(软提醒)
         const isHardLimited = Boolean(resetBtn) || (text.includes('已达到') && text.includes('上限'));
+        const waitSeconds = resetAtMs ? Math.max(0, Math.ceil((resetAtMs - Date.now()) / 1000)) : null;
+
         return {
           isLimited: isHardLimited,
           isApproachingLimit: Boolean(banner) && !isHardLimited,
-          resetAt: mReset ? mReset[1] : null,
+          resetAt: resetAtStr,
+          resetAtMs,
+          waitSeconds,
           hasResetCard: Boolean(resetBtn && !resetBtn.disabled),
           canBuyCredits: Boolean(buyBtn),
           canUpgrade: Boolean(upgradeBtn),

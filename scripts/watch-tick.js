@@ -15,6 +15,8 @@
  */
 
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const { execSync } = require('node:child_process');
 const { callTool } = require(path.join(__dirname, '..', 'src/mcp/handler'));
 
@@ -22,12 +24,32 @@ const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const quiet = args.includes('--quiet');
 
-// 极速前置门禁：MiniMax Code 进程未运行时秒级退出，杜绝空转消耗电量与 CPU
+// 极速前置门禁 1：MiniMax Code 进程未运行时秒级退出，杜绝空转消耗电量与 CPU
 try {
   execSync('pgrep -f "MiniMax Code"', { stdio: 'ignore' });
 } catch {
   if (!quiet) console.log('MiniMax Code 未在运行，跳过本次巡检');
   process.exit(0);
+}
+
+// 极速前置门禁 2：额度耗尽感知与精准唤醒时间对齐
+// 若已知当前处于 Token Plan 配额锁定状态，且距离下一次刷新时间较远，1ms 内极速退出，坚决不进行无谓的 DOM/CDP/SQLite 消耗
+const STATE_FILE = path.join(os.homedir(), '.minimax-mcp', 'watch-state.json');
+let watchState = {};
+try { watchState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
+
+async function checkQuotaLockGate() {
+  const now = Date.now();
+  if (watchState.quotaLockedUntilMs && now < watchState.quotaLockedUntilMs) {
+    const remainingSec = Math.ceil((watchState.quotaLockedUntilMs - now) / 1000);
+    if (remainingSec > 60) {
+      if (!quiet) console.log(`[额度锁定中] Token Plan 配额将于 ${watchState.quotaResetAt || '稍后'} 重置，剩余 ${Math.ceil(remainingSec / 60)} 分钟，跳过无效空转`);
+      process.exit(0);
+    } else if (remainingSec > 0 && !dryRun) {
+      if (!quiet) console.log(`[额度即将刷新] 距离重置仅剩 ${remainingSec} 秒，精确等待至刷新瞬间直接接续...`);
+      await new Promise((r) => setTimeout(r, remainingSec * 1000 + 1500));
+    }
+  }
 }
 
 // 从环境变量读策略，方便在不改代码的前提下调
@@ -38,6 +60,8 @@ if (process.env.MINIMAX_WATCH_MIN_IDLE) policy.minIdleSeconds = Number(process.e
 if (process.env.MINIMAX_WATCH_MAX_ACTIONS) policy.maxActionsPerTick = Number(process.env.MINIMAX_WATCH_MAX_ACTIONS);
 
 async function main() {
+  await checkQuotaLockGate();
+
   const res = await callTool('minimax_watch', { action: 'tick', dryRun, policy });
   if (res.isError) {
     console.error(res.content[0].text);
@@ -53,6 +77,25 @@ async function main() {
       resumeRes = JSON.parse(resumeCall.content[0].text);
     }
   } catch {}
+
+  // 维护配额锁定与精准唤醒状态锁
+  if (!dryRun) {
+    let stateChanged = false;
+    if (resumeRes?.reason === 'quota_exhausted' && resumeRes?.resetAtMs) {
+      watchState.quotaLockedUntilMs = resumeRes.resetAtMs + 5000;
+      watchState.quotaResetAt = resumeRes.quotaStatus?.resetAt || null;
+      stateChanged = true;
+    } else if (resumeRes?.resumedCount > 0 || (resumeRes?.quotaAvailable && watchState.quotaLockedUntilMs)) {
+      delete watchState.quotaLockedUntilMs;
+      delete watchState.quotaResetAt;
+      stateChanged = true;
+    }
+    if (stateChanged) {
+      try {
+        fs.writeFileSync(STATE_FILE, `${JSON.stringify(watchState, null, 1)}\n`);
+      } catch {}
+    }
+  }
 
   const resumedCount = resumeRes?.resumedCount || 0;
   const total = r.events.length + r.actions.length + r.needsHuman.length + resumedCount;
