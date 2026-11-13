@@ -59,14 +59,22 @@ function main() {
 
     const list = await send('tools/list', {});
     const tools = list.result?.tools || [];
-    record('tools/list', tools.length >= 14, `${tools.length} 个工具`);
+    record('tools/list', tools.length === 11, `${tools.length} 个工具 (精简为 11 层级架构)`);
 
-    // 逐个调所有只读工具。用真实参数，确保不只是"能返回错误"。
+    // 逐个调所有只读工具与层级入口。用真实参数，确保不只是"能返回错误"。
     const readOnlyCalls = [
       ['minimax_status', {}],
+      ['minimax_session', { action: 'list', limit: 3 }],
+      ['minimax_session', { action: 'tail', count: 2, perSession: 1 }],
+      ['minimax_session', { action: 'search', query: 'minimax', limit: 2 }],
+      ['minimax_questionnaire', { action: 'list' }],
+      ['minimax_desktop', { action: 'windows' }],
+      ['minimax_bot', { action: 'roster' }],
+      ['minimax_agent', { action: 'result', timeoutSeconds: 2 }],
+      ['minimax_tasks', { limit: 3 }],
+      // 兼容别名也要继续能调通
       ['minimax_list_sessions', { limit: 3 }],
       ['minimax_pending', {}],
-      ['minimax_tasks', { limit: 3 }],
       ['minimax_tail_sessions', { count: 2, perSession: 1 }],
       ['minimax_search', { query: 'minimax', limit: 2 }],
       ['minimax_windows', {}],

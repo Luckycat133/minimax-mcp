@@ -26,8 +26,8 @@ const check = async (label, fn) => {
 
 // 不写死数字：工具数只保证"在合理区间"，具体一致性由 glama.json 那条断言盯
 check('工具数在合理区间', () => {
-  assert.ok(TOOLS.length >= 14, `工具数太少: ${TOOLS.length}`);
-  assert.ok(TOOLS.length <= 40, `工具数异常膨胀: ${TOOLS.length}`);
+  assert.ok(TOOLS.length >= 8, `工具数太少: ${TOOLS.length}`);
+  assert.ok(TOOLS.length <= 25, `工具数异常膨胀: ${TOOLS.length}`);
 });
 
 check('工具名无重复', () => {
@@ -58,19 +58,17 @@ check('每个工具的 inputSchema 都是合法 object schema', () => {
 });
 
 check('危险工具默认不动作', () => {
-  // send_message：send 默认 false（要发必须显式），preview 是可选开关
-  const send = TOOLS.find((t) => t.name === 'minimax_send_message');
-  assert.strictEqual(send.inputSchema.properties.send.default, false, 'send 默认必须 false');
-  // answer_question：会替用户做决定，所以 preview 默认 true、force 默认 false
-  const ans = TOOLS.find((t) => t.name === 'minimax_answer_question');
-  assert.strictEqual(ans.inputSchema.properties.preview.default, true, 'answer 的 preview 默认必须 true');
-  assert.strictEqual(ans.inputSchema.properties.force.default, false, 'force 默认必须 false');
+  // agent：send 默认 false（要发必须显式），preview 是可选开关
+  const agent = TOOLS.find((t) => t.name === 'minimax_agent');
+  assert.strictEqual(agent.inputSchema.properties.send.default, false, 'send 默认必须 false');
+  // questionnaire：会替用户做决定，所以 preview 默认 true、force 默认 false
+  const qn = TOOLS.find((t) => t.name === 'minimax_questionnaire');
+  assert.strictEqual(qn.inputSchema.properties.preview.default, true, 'questionnaire 的 preview 默认必须 true');
+  assert.strictEqual(qn.inputSchema.properties.force.default, false, 'force 默认必须 false');
 });
 
 check('只读工具没有 send/force 这类动作参数', () => {
-  const readOnly = ['minimax_status', 'minimax_list_sessions', 'minimax_read_session',
-    'minimax_tail_sessions', 'minimax_search', 'minimax_pending', 'minimax_tasks',
-    'minimax_windows', 'minimax_get_result', 'minimax_draft_answer'];
+  const readOnly = ['minimax_status', 'minimax_brief', 'minimax_session', 'minimax_events', 'minimax_tasks'];
   for (const n of readOnly) {
     const t = TOOLS.find((x) => x.name === n);
     assert.ok(t, `缺工具 ${n}`);

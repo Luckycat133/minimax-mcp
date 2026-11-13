@@ -8,7 +8,7 @@
   "tools": [
     {
       "name": "minimax_brief",
-      "intent": "态势快照：只输出需要处理的事，按 等你决定→报错→卡住→在跑→刚完成 排序",
+      "intent": "态势快照：按 等你决定>报错>卡住>运行中 优先级输出需关注的会话。纯读数据库，巡检首选。",
       "input": {
         "stalledMinutes": "integer, 默认 10",
         "activeMinutes": "integer, 默认 10",
@@ -20,224 +20,133 @@
     },
     {
       "name": "minimax_status",
-      "intent": "本地状态总览",
+      "intent": "获取 MiniMax Code 本地状态：包含客户端连通性、CDP端口、额度重置精确时间、数据库及 Bot 团队状态。",
       "input": {},
-      "output": "dbPath, dbFound, sessions, messages, lastActivity, runningTasks",
-      "sideEffects": "none"
+      "output": "app{running,pid}, cdp{online,port}, quota{resetAtMs,waitSeconds}, database{path,sessions,messages}",
+      "sideEffects": "none（纯读状态）"
     },
     {
-      "name": "minimax_list_sessions",
-      "intent": "按最近活动列出会话",
+      "name": "minimax_session",
+      "intent": "原生会话统一管理与探索：支持会话列表查询(list)、指定会话详情与历史翻页精读(read)、多会话末尾采样(tail)、跨会话全文检索(search)。",
       "input": {
-        "limit": "integer 1-100, 默认 20"
-      },
-      "output": "sessions[{index, sessionId, messages, lastActivity, firstUserMessage}]",
-      "sideEffects": "none"
-    },
-    {
-      "name": "minimax_read_session",
-      "intent": "读某个会话的消息",
-      "input": {
-        "session": "string|number（必填）",
-        "limit": "integer, 默认 30",
+        "action": "string, enum [list, read, tail, search], 默认 list",
+        "session": "string (action=read 时使用)",
+        "sessionId": "string (同 session)",
+        "limit": "integer, 默认 20",
         "includeThinking": "boolean, 默认 false",
-        "before": "integer, 可选；从这个消息 id 之前开始读，用于往前翻页"
+        "before": "integer (翻页锚点)",
+        "query": "string (action=search 时使用)",
+        "count": "integer (action=tail 时使用)",
+        "perSession": "integer (action=tail 时使用)"
       },
-      "output": "sessionId, returned, oldestId, hasMore, messages[{id,role,time,content,tools,thinking?}]",
-      "sideEffects": "none"
+      "output": "sessions[] (list/tail时) 或 {sessionId, returned, messages[]} (read时) 或 hits[] (search时)",
+      "sideEffects": "none（纯读数据库）"
     },
     {
-      "name": "minimax_tail_sessions",
-      "intent": "最近 N 个会话各自最新的几条",
+      "name": "minimax_agent",
+      "intent": "主工作区通用智能体调度与执行：支持全自动下发提示词与自动切会话(send)、等待并收取任务产出(result)、终止当前轮次生成(stop)、新建任务视图(new)。外部 Agent 无需接触任何 UI 坐标。",
       "input": {
-        "count": "默认 3",
-        "perSession": "默认 2"
-      },
-      "output": "sessions[...{latest}]",
-      "sideEffects": "none"
-    },
-    {
-      "name": "minimax_search",
-      "intent": "跨会话全文搜索",
-      "input": {
-        "query": "string（必填）",
-        "limit": "默认 20"
-      },
-      "output": "hits[{sessionId, role, time, snippet}]",
-      "sideEffects": "none"
-    },
-    {
-      "name": "minimax_pending",
-      "intent": "等你回答的提问/确认",
-      "input": {},
-      "output": "pending[{requestId, sessionId, agent, createdAt, question}]",
-      "sideEffects": "none"
-    },
-    {
-      "name": "minimax_tasks",
-      "intent": "后台任务状态",
-      "input": {
-        "limit": "默认 20",
-        "status": "可选过滤"
-      },
-      "output": "tasks[{taskId, sessionId, kind, status, createdAt, updatedAt}]",
-      "sideEffects": "none"
-    },
-    {
-      "name": "minimax_windows",
-      "intent": "MiniMax 窗口几何",
-      "input": {},
-      "output": "count, windows[{pid,x,y,width,height,title,app}]",
-      "sideEffects": "none"
-    },
-    {
-      "name": "minimax_activate",
-      "intent": "切到前台",
-      "input": {},
-      "output": "activated, front{app,title,pid,x,y,width,height}",
-      "sideEffects": "窗口切换"
-    },
-    {
-      "name": "minimax_screenshot",
-      "intent": "截图",
-      "input": {
-        "name": "string, 默认 minimax",
-        "mode": "screen | region, 默认 screen",
-        "x": "number（region 必填）",
-        "y": "number（region 必填）",
-        "width": "number（region 必填）",
-        "height": "number（region 必填）"
-      },
-      "output": "path, thumbnail",
-      "sideEffects": "写截图文件"
-    },
-    {
-      "name": "minimax_send_message",
-      "intent": "向指定或当前会话发送指令。全代码内建自动化：指定 sessionId 自动切换；newSession=true 自动开新任务；自动注入并点击发送。外部 Agent 无需接触任何 UI 坐标。",
-      "input": {
-        "message": "string (必需)",
-        "sessionId": "string (可选，目标会话 ID)",
+        "action": "string, enum [send, result, stop, new], 默认 send",
+        "message": "string (action=send 时必需)",
+        "sessionId": "string (指定则代码自动切换会话)",
         "newSession": "boolean, 默认 false",
         "send": "boolean, 默认 false",
         "quietSeconds": "integer, 默认 300",
         "force": "boolean, 默认 false",
-        "preview": "boolean, 默认 false"
+        "preview": "boolean, 默认 false",
+        "timeoutSeconds": "integer, 默认 0",
+        "afterMessageId": "integer"
       },
-      "output": "sent, verified, sessionId, messageId, via",
-      "sideEffects": "send=true 会在会话中产生真实用户消息并触发 Agent 执行"
+      "output": "执行结果回执 (sent/verified/result/stopped)",
+      "sideEffects": "action=send 且 send:true 时会注入消息并触发 Agent 执行"
     },
     {
-      "name": "minimax_get_result",
-      "intent": "等某会话跑完并收回最终回复",
+      "name": "minimax_bot",
+      "intent": "MiniMax Bot 团队全功能协同：查看团队名册与流水线架构(roster)、向指定群聊或专家发送指令(send)、读取对话历史(read)、取消轮次(cancel)、恢复待处理消息(resume)、答复卡片问卷(answer)。支持「剪辑师」「导演」「幸喵剪辑室」等中文别名。",
       "input": {
-        "sessionId": "可选，默认最近活跃",
-        "afterMessageId": "默认 0",
-        "timeoutSeconds": "默认 300"
-      },
-      "output": "done, sessionId, waitedSeconds, lastAssistantMessageId, result",
-      "sideEffects": "none（只读轮询）"
-    },
-    {
-      "name": "minimax_draft_answer",
-      "intent": "读一条提问并生成建议答案（只读）",
-      "input": {
-        "requestId": "string（必填）"
-      },
-      "output": "requestId, status, title, steps[{stepId,question,options[{optionId,label,recommended}]}], suggestion{answers, replyPayload}",
-      "sideEffects": "none"
-    },
-    {
-      "name": "minimax_answer_question",
-      "intent": "提交一条提问的回答",
-      "input": {
-        "requestId": "string（必填）",
-        "selections": "[{stepId, optionIds|selectedOptionIds, selectedOther?, otherText?}]，省略则用 recommended 那份",
-        "preview": "boolean, 默认 true",
-        "force": "boolean, 默认 false",
-        "region": "可选 {x,y,width,height}，默认 MiniMax 主窗口"
-      },
-      "output": "preview{wouldSubmit,clickPlan} | submitted + verified + status + clicked[] | missed[] / warning",
-      "sideEffects": "preview=true 无副作用；否则 OCR 定位选项并点击，按需点提交按钮，全程核对数据库状态"
-    },
-    {
-      "name": "minimax_new_task",
-      "intent": "新建任务页（⌘N）",
-      "input": {},
-      "output": "opened, newWindow, window{x,y,width,height}, hint",
-      "sideEffects": "按键；可能开出新窗口"
-    },
-    {
-      "name": "minimax_stop_generation",
-      "intent": "停止当前这轮生成",
-      "input": {},
-      "output": "stopped, via",
-      "sideEffects": "按 Esc 键"
-    },
-    {
-      "name": "minimax_watch",
-      "intent": "跑一轮主动巡检：比对快照产出事件，并按策略自动处理低风险的事",
-      "input": {
-        "action": "tick|status|reset|config, 默认 tick；config 读写持久化策略",
-        "dryRun": "boolean, 默认 false",
-        "policy": "{mode, riskCeiling, minIdleSeconds, maxActionsPerTick, autoNudge, allowSessions}",
-        "stalledMinutes": "integer, 默认 10",
-        "finishedMinutes": "integer, 默认 60"
-      },
-      "output": "at, idleSeconds, policy, counts, events[], actions[], needsHuman[], statePath/eventPath/reportPath",
-      "sideEffects": "可能点选项、发催促（受风险策略 + 人离开时长 + 每轮限额约束）；dryRun=true 时无副作用"
-    },
-    {
-      "name": "minimax_events",
-      "intent": "读巡检事件队列",
-      "input": {
-        "since": "ISO 时间或毫秒时间戳，可选",
-        "limit": "integer, 默认 50"
-      },
-      "output": "events[], count, total",
-      "sideEffects": "none（纯读文件）"
-    },
-    {
-      "name": "minimax_bot_roster",
-      "intent": "获取 MiniMax Bot 团队架构与名册（群聊流水线、成员角色、工具与对应底层会话）。",
-      "input": {},
-      "output": "groups[], bots[], totalGroups, totalBots, version",
-      "sideEffects": "none（纯读本地架构状态）"
-    },
-    {
-      "name": "minimax_bot_message",
-      "intent": "与 MiniMax Bot 团队沟通：向指定群聊或成员 Bot 发送指令，或读取团队最新对话。支持中文名智能解析（如「剪辑师」、「导演」、「幸喵剪辑室」）。",
-      "input": {
-        "target": "string (可选，Bot名/群名/ID)",
-        "text": "string (可选，待发送文本)",
+        "action": "string, enum [roster, send, read, cancel, resume, answer], 默认 roster",
+        "target": "string (Bot名/群名/ID)",
+        "text": "string (action=send 时必需)",
         "mode": "string, enum [direct, group], 默认 direct",
-        "action": "string, enum [send, read]",
-        "limit": "integer, 默认 20"
-      },
-      "output": "target, source, messages[] (read时) 或发送回执 (send时)",
-      "sideEffects": "action=send 会在 Bot 对话中发送消息并触发发言"
-    },
-    {
-      "name": "minimax_bot_turn",
-      "intent": "MiniMax Bot 团队轮次与卡片管控：取消正在执行的轮次、恢复待处理消息或提交问卷卡片答复。",
-      "input": {
-        "target": "string (可选，Bot名或群名)",
-        "action": "string, enum [cancel, resume_pending, answer] (必需)",
+        "limit": "integer, 默认 20",
         "messageId": "string (action=answer 时必需)",
         "answers": "object (action=answer 时必需)"
       },
-      "output": "target, action, 执行回执",
-      "sideEffects": "会改变 Bot 轮次状态或提交卡片答案"
+      "output": "roster 对象 (roster时) 或 {target, messages[]} (read时) 或发送/操作回执",
+      "sideEffects": "action=send 会在 Bot 对话中发送消息；action=answer 会提交卡片问卷"
+    },
+    {
+      "name": "minimax_questionnaire",
+      "intent": "人工问卷与审批卡片生命周期管控：列出当前待回答问卷(list)、获取问卷题目与策略推荐草稿(draft)、自动提交选定答案(answer)。代码全自动派发 DOM，外部 Agent 零坐标操作。",
+      "input": {
+        "action": "string, enum [list, draft, answer], 默认 list",
+        "requestId": "string (action=draft 或 answer 时必需)",
+        "selections": "array (action=answer 时可选)",
+        "preview": "boolean, 默认 true",
+        "force": "boolean, 默认 false"
+      },
+      "output": "pending[] (list时) 或 {requestId, title, steps, suggestion} (draft时) 或 {submitted, verified} (answer时)",
+      "sideEffects": "action=answer 且 preview:false 时会提交问卷修改状态"
+    },
+    {
+      "name": "minimax_desktop",
+      "intent": "桌面客户端前台与显示控制：将窗口唤醒前台并可选挂载 CDP 调试端口(activate)、捕获窗口截图(screenshot)、查询窗口几何坐标与置顶状态(windows)。",
+      "input": {
+        "action": "string, enum [activate, screenshot, windows], 默认 activate",
+        "relaunchWithDebug": "boolean",
+        "name": "string, 默认 minimax",
+        "mode": "string, enum [screen, region], 默认 screen",
+        "x": "number",
+        "y": "number",
+        "width": "number",
+        "height": "number"
+      },
+      "output": "窗口状态、截图文件路径或窗口列表",
+      "sideEffects": "action=activate 会改变前台焦点或重启挂载端口"
     },
     {
       "name": "minimax_auto_resume",
-      "intent": "智能断点续传：自动识别因额度耗尽(2056)而挂起的会话，在额度恢复后自动继续",
+      "intent": "智能断点续传：自动识别因额度耗尽(2056)或渠道熔断而挂起的会话，在额度恢复后自动继续（原生对话点继续，Bot 对话推进轮次）。",
       "input": {
         "dryRun": "boolean, 默认 true",
         "limit": "integer, 默认 5",
-        "sessionId": "string, 可选"
+        "sessionId": "string"
       },
-      "output": "ok, dryRun, quotaAvailable, quotaStatus, resumedCount, results[]",
-      "sideEffects": "dryRun=false 时通过 CDP 点击播放键或触发 Bot 轮次恢复"
+      "output": "quotaAvailable, resumedCount, results[]",
+      "sideEffects": "dryRun:false 会解除 SQLite 熔断锁并触发继续"
+    },
+    {
+      "name": "minimax_watch",
+      "intent": "周期巡检：比对快照产出事件，可按安全策略自动处理低风险问卷。dryRun=true 仅预览。",
+      "input": {
+        "action": "string, enum [tick, status, reset, config], 默认 tick",
+        "dryRun": "boolean, 默认 false",
+        "policy": "object",
+        "stalledMinutes": "integer",
+        "finishedMinutes": "integer"
+      },
+      "output": "events[], actions[], needsHuman[]",
+      "sideEffects": "mode=act 且有低风险卡住任务时会触发自动催促或代答"
+    },
+    {
+      "name": "minimax_events",
+      "intent": "读取巡检事件队列(finished/error/question/stalled/task_failed)。纯读无副作用。",
+      "input": {
+        "since": "string",
+        "limit": "integer, 默认 50"
+      },
+      "output": "events[{key,at,type,sessionId,title,detail}]",
+      "sideEffects": "none（纯读内存事件）"
+    },
+    {
+      "name": "minimax_tasks",
+      "intent": "查询 MiniMax 后台任务状态(running/succeeded/failed/canceled)。",
+      "input": {
+        "limit": "integer, 默认 20",
+        "status": "string"
+      },
+      "output": "tasks[{taskId, status, command, cwd, createdAt}]",
+      "sideEffects": "none（纯读状态）"
     }
   ]
 }

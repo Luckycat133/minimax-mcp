@@ -1,12 +1,16 @@
 'use strict';
 
 /**
- * handler.js — 工具分发。所有控制类工具先做前台校验，不在前台就直接返回错误，
- * 不硬来，避免点到用户正在用的窗口。
+ * handler.js — MCP 请求分发与执行引擎（多层触发 Tiered Action 规范版）。
+ *
+ * 核心架构：
+ * 1. 采用渐进式披露的多层分发机制（minimax_session, minimax_agent, minimax_bot, minimax_questionnaire, minimax_desktop）。
+ * 2. 界面操作全由底层代码在 CDP / DOM / SQLite 层面自动闭环执行，外部 Agent 零物理坐标接触。
+ * 3. 完整保留对遗留单动作工具名的向下透明兼容。
  */
 
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
 const db = require('../gateway/db');
 const gui = require('../gateway/gui');
 const ocr = require('../gateway/ocr');
@@ -25,10 +29,10 @@ let tasksEnabled = false;
 function setTasksEnabled(v) { tasksEnabled = v === true; }
 
 const READONLY = new Set([
-  'minimax_brief', 'minimax_status', 'minimax_list_sessions', 'minimax_read_session',
-  'minimax_tail_sessions', 'minimax_search', 'minimax_pending', 'minimax_draft_answer',
-  'minimax_tasks', 'minimax_windows', 'minimax_get_result', 'minimax_events',
-  'minimax_bot_roster',
+  'minimax_brief', 'minimax_status', 'minimax_session', 'minimax_events', 'minimax_tasks',
+  // 兼容别名
+  'minimax_list_sessions', 'minimax_read_session', 'minimax_tail_sessions', 'minimax_search',
+  'minimax_pending', 'minimax_draft_answer', 'minimax_windows', 'minimax_get_result', 'minimax_bot_roster',
 ]);
 
 function ok(payload) {
@@ -48,92 +52,43 @@ function fail(message) {
  */
 function guardCandidates() {
   const seen = new Map();
-  for (const s of db.recentlyTouchedSessions(3)) {
+  for (const s of db.recentlyTouchedSessions(5)) {
     seen.set(s.sessionId, { ...s, source: 'touched' });
   }
-  for (const s of db.listSessions(3)) {
+  for (const s of db.listSessions(10)) {
     if (!seen.has(s.sessionId)) {
-      seen.set(s.sessionId, { sessionId: s.sessionId, title: s.firstUserMessage || '', status: null, lastActivityMs: s.lastActivityMs, source: 'messages' });
+      seen.set(s.sessionId, { ...s, source: 'active' });
     }
   }
-  return [...seen.values()];
-}
-
-/** 点击前的命中测试：那个点上盖着别的 App 就不能点。 */
-function blockedByOverlay(x, y) {
-  const hit = gui.topmostAt(x, y);
-  if (!hit) return null;
-  if (hit.app === gui.APP) return null;
-  return hit;
+  return Array.from(seen.values());
 }
 
 /**
- * 解析 "x,y"。格式不对就抛错。
- *
- * 为什么必须挡：`"abc".split(',')` 得到 [NaN]，NaN 一路传到点击就是"点了但什么也没发生"，
- * 调用方还以为是界面没响应。这类静默失败比报错难查得多。
+ * 点某个坐标前，先看该坐标有没有被 MiniMax 之外的"在屏窗口"盖住。
  */
-function parseAt(at) {
-  const parts = String(at).split(',').map((v) => Number(v.trim()));
-  if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n))) {
-    throw new Error(`at 坐标格式不对：${JSON.stringify(at)}；应该像 "640,880"`);
-  }
-  const [x, y] = parts;
-  if (x < 0 || y < 0) throw new Error(`at 坐标不能是负数：${x},${y}`);
-  if (x > 20000 || y > 20000) throw new Error(`at 坐标看起来不在任何屏幕上：${x},${y}`);
-  return { x, y, text: `${x},${y}` };
-}
-
-/**
- * 按锚点找文字，找不到就缩短再试。
- * 原因：选项文案常常换行渲染，OCR 会把它切成两条观测，长锚点跨行必然匹配不上。
- */
-function findByAnchor(anchor, region) {
-  const text = String(anchor || '').trim();
-  if (!text) return null;
-  const tries = [text];
-  for (const n of [12, 8, 5]) {
-    if (text.length > n) tries.push(text.slice(0, n));
-  }
-  for (const q of tries) {
-    const r = ocr.find(q, { region, refresh: true, mode: 'contains' });
-    if (r.picked) return { ...r.picked, matchedBy: q };
+function blockedByOverlay(targetX, targetY) {
+  const onScreen = gui.appWindows();
+  for (const w of onScreen) {
+    if (w.app === gui.APP) continue;
+    if (targetX >= w.x && targetX <= w.x + w.width &&
+        targetY >= w.y && targetY <= w.y + w.height) {
+      return w;
+    }
   }
   return null;
+}
+
+function parseAt(raw) {
+  if (typeof raw !== 'string') return null;
+  const m = raw.match(/^\s*(\d+)\s*,\s*(\d+)\s*$/);
+  if (!m) return null;
+  return { x: Number(m[1]), y: Number(m[2]), text: `${m[1]},${m[2]}` };
 }
 
 async function dispatch(name, args = {}, ctx = null) {
   try {
     switch (name) {
-      case 'minimax_watch': {
-        const action = args.action || 'tick';
-        if (action === 'status') return ok(watch.status());
-        if (action === 'reset') return ok(watch.reset());
-        if (action === 'config') {
-          const saved = args.policy ? watch.savePolicy(args.policy) : watch.loadPolicy();
-          return ok({
-            policyPath: watch.POLICY_FILE,
-            saved: Boolean(args.policy),
-            policy: watch.effectivePolicy(),
-            file: saved,
-          });
-        }
-        const r = await watch.tick({
-          policy: args.policy,
-          dryRun: args.dryRun === true,
-          stalledMinutes: args.stalledMinutes,
-          finishedMinutes: args.finishedMinutes,
-          // 自动动作也走 callTool，这样审计和注解都一致
-          execute: (tool, toolArgs) => callTool(tool, toolArgs, ctx),
-        });
-        return ok(r);
-      }
-
-      case 'minimax_events': {
-        const r = watch.readEvents(args.since, args.limit ?? 50);
-        return ok(r);
-      }
-
+      // ---------- 1. 态势与巡检 ----------
       case 'minimax_brief':
         return ok(brief.brief({
           stalledMinutes: args.stalledMinutes,
@@ -159,583 +114,266 @@ async function dispatch(name, args = {}, ctx = null) {
             s.quota = await cdp.getQuotaStatus();
           } catch (_) {}
         } else if (s.app.running) {
-          s.cdp.hint = 'MiniMax 正在运行但未开启 CDP 调试端口 (9223)。可调用 minimax_activate({ relaunchWithDebug: true }) 挂载调试端口。';
+          s.cdp.hint = 'MiniMax 正在运行但未开启 CDP 调试端口 (9223)。可调用 minimax_desktop({ action: "activate", relaunchWithDebug: true }) 挂载调试端口。';
         } else {
-          s.cdp.hint = 'MiniMax Code 尚未运行。可调用 minimax_activate 启动。';
+          s.cdp.hint = 'MiniMax Code 尚未运行。可调用 minimax_desktop({ action: "activate" }) 启动。';
         }
         return ok(s);
       }
 
-      case 'minimax_list_sessions':
-        return ok({ sessions: db.listSessions(args.limit ?? 20) });
-
-      case 'minimax_read_session': {
-        const target = args.session || args.sessionId;
-        if (!target) return fail('缺少必填参数 session 或 sessionId');
-        const r = db.readSession(target, args.limit ?? 30, args.includeThinking === true, args.before ?? null);
-        return r.error ? fail(r.error) : ok(r);
+      case 'minimax_watch': {
+        const action = args.action || 'tick';
+        if (action === 'status') return ok(watch.status());
+        if (action === 'reset') return ok(watch.reset());
+        if (action === 'config') {
+          const saved = args.policy ? watch.savePolicy(args.policy) : watch.loadPolicy();
+          return ok({
+            policyPath: watch.POLICY_FILE,
+            saved: Boolean(args.policy),
+            policy: watch.effectivePolicy(),
+            file: saved,
+          });
+        }
+        const r = await watch.tick({
+          policy: args.policy,
+          dryRun: args.dryRun === true,
+          stalledMinutes: args.stalledMinutes,
+          finishedMinutes: args.finishedMinutes,
+          execute: (tool, toolArgs) => callTool(tool, toolArgs, ctx),
+        });
+        return ok(r);
       }
 
-      case 'minimax_tail_sessions':
-        return ok({ sessions: db.tailSessions(args.count ?? 3, args.perSession ?? 2) });
-
-      case 'minimax_search':
-        return ok({ hits: db.search(args.query, args.limit ?? 20, args.includeTitles !== false) });
-
-      case 'minimax_pending':
-        return ok({ pending: db.pending() });
+      case 'minimax_events': {
+        const r = watch.readEvents(args.since, args.limit ?? 50);
+        return ok(r);
+      }
 
       case 'minimax_tasks':
         return ok({ tasks: db.tasks(args.limit ?? 20, args.status ?? null) });
 
-      case 'minimax_windows': {
-        const onScreen = gui.appWindows();
-        const all = gui.windowsAll().filter((w) => w.app === gui.APP);
-        const hidden = all.filter((w) => !onScreen.some((o) => o.pid === w.pid && o.x === w.x));
-        return ok({
-          onScreenCount: onScreen.length,
-          windows: onScreen,
-          hiddenOrOtherSpace: hidden.map((w) => ({ pid: w.pid, x: w.x, y: w.y, width: w.width, height: w.height, title: w.title })),
-          note: hidden.length
-            ? '有窗口不在当前屏上（被隐藏/最小化/在别的 Space）。激活用 minimax_activate，它会自己拉回来。'
-            : null,
-        });
+      case 'minimax_auto_resume': {
+        const { autoResume } = require('../gateway/resume');
+        const dryRun = args.dryRun !== false;
+        const limit = args.limit || 5;
+        const res = await autoResume({ dryRun, limit, sessionId: args.sessionId });
+        return ok(res);
       }
 
-      case 'minimax_activate': {
-        if (args.relaunchWithDebug) {
-          const { launchWithDebug } = require(path.join(__dirname, '..', '..', 'scripts', 'launch-with-debug'));
-          const r = await launchWithDebug();
-          if (!r.ok) return fail(`挂载调试端口重启失败: ${r.error}`);
-          return ok({
-            relaunchWithDebug: true,
-            cdp: r,
-            activeApp: gui.activeApp(),
-            topmostWindow: gui.topmostApp(),
-            window: gui.mainWindow(),
-          });
+      // ---------- 2. 原生会话统一管理 (minimax_session) ----------
+      case 'minimax_session': {
+        const action = args.action || 'list';
+        if (action === 'list') {
+          return ok({ sessions: db.listSessions(args.limit ?? 20) });
+        }
+        if (action === 'read') {
+          const target = args.session || args.sessionId;
+          if (!target) return fail('action=read 时缺少参数 session 或 sessionId');
+          const r = db.readSession(target, args.limit ?? 30, args.includeThinking === true, args.before ?? null);
+          return r.error ? fail(r.error) : ok(r);
+        }
+        if (action === 'tail') {
+          return ok({ sessions: db.tailSessions(args.count ?? 3, args.perSession ?? 2) });
+        }
+        if (action === 'search') {
+          const query = args.query || args.q;
+          if (!query) return fail('action=search 时 query 不能为空');
+          return ok({ hits: db.search(query, args.limit ?? 20, true) });
+        }
+        return fail(`未知会话操作类型: ${action}`);
+      }
+
+      // ---------- 3. 原生通用智能体调度 (minimax_agent) ----------
+      case 'minimax_agent': {
+        const action = args.action || 'send';
+
+        if (action === 'new') {
+          if (await cdp.isAvailable()) {
+            try {
+              const r = await cdp.newTask();
+              return ok({ opened: true, via: r.via || 'cdp', note: '已通过 CDP 快速切换至新建任务页' });
+            } catch (_) {}
+          }
+          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+          gui.pressKey('n', ['cmd']);
+          gui.sleep(1200);
+          return ok({ opened: true, via: 'gui-cmd-n', note: '已发送 ⌘N 新建任务快捷键' });
         }
 
-        // 1. 优先走 CDP 原生聚焦 (亚 10ms，免 LaunchServices/AppleScript 等待)
-        if (await cdp.isAvailable()) {
-          try {
-            const r = await cdp.bringToFront();
-            if (r && r.ok) {
-              return ok({
-                recovered: null,
-                launched: false,
-                via: 'cdp',
-                note: '已通过 CDP 原生将 MiniMax 置于前台并聚焦',
-              });
+        if (action === 'stop') {
+          if (await cdp.isAvailable()) {
+            try {
+              const r = await cdp.evaluate(`
+                (() => {
+                  const stopBtn = document.querySelector("[data-testid*='stop'], button[aria-label*='停止'], .stop-button");
+                  if (stopBtn && !stopBtn.disabled) {
+                    stopBtn.click();
+                    return { ok: true, via: 'cdp-button' };
+                  }
+                  return { ok: false };
+                })()
+              `);
+              if (r && r.ok) return ok({ stopped: true, via: 'cdp-stop-button' });
+            } catch (_) {}
+          }
+          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+          gui.pressKey('escape');
+          return ok({ stopped: true, via: 'escape' });
+        }
+
+        if (action === 'result') {
+          let sid = null;
+          let fallback = false;
+          if (args.sessionId || args.session) {
+            sid = db.resolveSession(args.sessionId || args.session);
+            if (!sid) return fail(`找不到会话: ${args.sessionId || args.session}`);
+          } else {
+            const recent = db.recentlyTouchedSessions(1)[0] || db.listSessions(1)[0];
+            if (!recent) return fail('找不到会话');
+            sid = recent.sessionId;
+            fallback = true;
+          }
+          const after = Number(args.afterMessageId || 0);
+          const timeout = args.timeoutSeconds !== undefined ? Number(args.timeoutSeconds) : 0;
+          const out = await db.waitForResult(sid, after, timeout, 3000, ctx && ctx.shouldStop);
+          if (fallback) out.note = '没指定 sessionId，用的是最近活跃会话；要精确请显式传 sessionId';
+          return ok(out);
+        }
+
+        if (action === 'send') {
+          const messageText = args.message || args.text || args.content;
+          if (!messageText) return fail('action=send 时 message 不能为空');
+
+          const quietSeconds = args.quietSeconds === undefined ? 300 : Number(args.quietSeconds);
+          const force = args.force === true;
+          let atParsed = null;
+          if (args.at !== undefined && args.at !== null) {
+            atParsed = parseAt(args.at);
+            if (!atParsed) return fail(`at 坐标格式不正确: "${args.at}"，期望 "x,y" 格式如 "640,880"`);
+          }
+
+          // 目标会话切换（若显式指定 sessionId 或 newSession）
+          const targetSid = (args.sessionId || args.session) ? db.resolveSession(args.sessionId || args.session) : null;
+          if (await cdp.isAvailable()) {
+            if (targetSid) {
+              await cdp.switchSession(targetSid);
+            } else if (args.newSession === true) {
+              await cdp.newTask();
             }
-          } catch (_) {}
-        }
-
-        let win = gui.mainWindow();
-        let recovered = null;
-        let launched = false;
-        if (!win) {
-          // 没窗口可能只是没启动。对"别的 agent 来用"这个场景，能自己拉起来比报错有用。
-          try {
-            gui.openApp();
-            gui.sleep(2500);
-            launched = true;
-          } catch (err) {
-            return fail(String(err.message || err));
           }
-          win = gui.mainWindow();
-          if (!win) {
-            return fail('尝试启动 MiniMax Code 后仍然找不到窗口，请手动打开一次确认。');
+
+          // 预览模式：只报告会发生什么，不点、不粘、不发。只读，所以不受守卫限制。
+          if (args.preview === true) {
+            const busy = guardCandidates()
+              .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
+              .filter((s) => s.idleSeconds < quietSeconds);
+
+            const win = gui.mainWindow();
+            const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, 'chat');
+
+            return ok({
+              preview: true,
+              wouldSend: args.send === true,
+              via: await cdp.isAvailable() ? 'cdp' : 'gui',
+              inputAt: coords || { via: 'cdp' },
+              targetSessionId: targetSid,
+              newSession: args.newSession === true,
+              overlay: coords ? blockedByOverlay(coords.x, coords.y) : null,
+              activeApp: gui.activeApp(),
+              busySessions: busy.map((s) => ({ sessionId: s.sessionId, title: s.title, idleSeconds: s.idleSeconds, source: s.source })),
+              guard: { busy: busy.length > 0, quietSeconds },
+            });
           }
-        }
-        if (!win.visible) {
-          // 窗口被隐藏、最小化或跑到别的 Space：OnScreenOnly 拿不到它，
-          // activate(PID) 也未必能拉回来，用 LaunchServices 打开最稳。
-          recovered = gui.openApp();
-          const after = gui.mainWindow();
-          win = after || win;
-        } else {
-          gui.activate(win.pid);
-          gui.sleep(900);
-        }
-        return ok({
-          recovered,
-          launched,
-          activeApp: gui.activeApp(),
-          topmostWindow: gui.topmostApp(),
-          window: win,
-        });
-      }
 
-      case 'minimax_screenshot': {
-        const region = args.mode === 'region'
-          ? { x: args.x, y: args.y, width: args.width, height: args.height }
-          : null;
-        if (args.mode === 'region' && (!region || [region.x, region.y, region.width, region.height].some((v) => typeof v !== 'number'))) {
-          return fail('mode=region 需要同时提供 x/y/width/height');
-        }
+          const win = gui.mainWindow();
+          const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, 'chat');
+          if (!coords && !await cdp.isAvailable()) return fail('拿不到 MiniMax 窗口位置且 CDP 未就绪');
 
-        // 1. 优先走 CDP 零权限高速截屏（亚 40ms 产出，免屏幕录制权限，直接读渲染合成帧）
-        if (await cdp.isAvailable() && args.mode !== 'region') {
-          try {
-            const outDir = path.join(__dirname, '..', '..', 'scripts', 'screenshots');
-            fs.mkdirSync(outDir, { recursive: true });
-            const safe = String(args.name || 'minimax').replace(/[^\w.-]+/g, '_').slice(0, 40) || 'minimax';
-            const targetPath = path.join(outDir, `${safe}_${Date.now()}.png`);
-            const res = await cdp.captureScreenshot(targetPath);
-            if (res && res.path) {
-              return ok({ path: res.path, bytes: res.bytes, via: 'cdp' });
-            }
-          } catch (_) {}
-        }
-
-        const shot = gui.screenshot(args.name || 'minimax', args.mode || 'screen', region);
-        return ok(shot);
-      }
-
-      case 'minimax_send_message': {
-        const layout = args.layout || 'chat';
-        const quietSeconds = args.quietSeconds === undefined ? 300 : Number(args.quietSeconds);
-        const force = args.force === true;
-
-        const atParsed = args.at !== undefined && args.at !== null ? parseAt(args.at) : null;
-
-        // 目标会话切换（若显式指定 sessionId 或 newSession）
-        const targetSid = (args.sessionId || args.session) ? db.resolveSession(args.sessionId || args.session) : null;
-        if (await cdp.isAvailable()) {
-          if (targetSid) {
-            await cdp.switchSession(targetSid);
-          } else if (args.newSession === true) {
-            await cdp.newTask();
-          }
-        }
-
-        // 预览模式：只报告会发生什么，不点、不粘、不发。只读，所以不受守卫限制。
-        if (args.preview === true) {
+          // 守卫：候选会话里有刚动过的就不发，除非显式 force。
           const busy = guardCandidates()
             .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
             .filter((s) => s.idleSeconds < quietSeconds);
+          if (busy.length > 0 && !force) {
+            const list = busy.map((s) => `${s.sessionId}${s.title ? `（${s.title}）` : ''} ${s.idleSeconds}s 前`).join('；');
+            return fail(
+              `有会话刚还在活动，看起来你正在对话中，已拒绝发送以免打扰：${list}。` +
+              `确认要发就加 force: true；或者调大 quietSeconds（当前 ${quietSeconds}）。`
+            );
+          }
 
-          const win = gui.mainWindow();
-          const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, layout);
-
-          return ok({
-            preview: true,
-            wouldSend: args.send === true,
-            via: await cdp.isAvailable() ? 'cdp' : 'gui',
-            inputAt: coords || { via: 'cdp' },
-            targetSessionId: targetSid,
-            newSession: args.newSession === true,
-            overlay: coords ? blockedByOverlay(coords.x, coords.y) : null,
-            activeApp: gui.activeApp(),
-            busySessions: busy.map((s) => ({ sessionId: s.sessionId, title: s.title, idleSeconds: s.idleSeconds, source: s.source })),
-            guard: { busy: busy.length > 0, quietSeconds },
-          });
-        }
-
-        const win = gui.mainWindow();
-        const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, layout);
-        if (!coords && !await cdp.isAvailable()) return fail('拿不到 MiniMax 窗口位置且 CDP 未就绪');
-
-        // 守卫：候选会话里有刚动过的就不发，除非显式 force。
-        // 防止把自动化/测试消息插进用户正在进行的工作。
-        const busy = guardCandidates()
-          .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
-          .filter((s) => s.idleSeconds < quietSeconds);
-        if (busy.length > 0 && !force) {
-          const list = busy.map((s) => `${s.sessionId}${s.title ? `（${s.title}）` : ''} ${s.idleSeconds}s 前`).join('；');
-          return fail(
-            `有会话刚还在活动，看起来你正在对话中，已拒绝发送以免打扰：${list}。` +
-            `确认要发就加 force: true；或者调大 quietSeconds（当前 ${quietSeconds}）。`
-          );
-        }
-
-        // 1. 优先走 CDP 零权限高速通道（无视遮挡、无需剪贴板污染、无需前台置顶）
-        if (!atParsed && await cdp.isAvailable()) {
-          try {
-            await cdp.typeMessage(args.message);
-            if (args.send !== true) {
-              return ok({ sent: false, note: '已通过 CDP 注入未发送；send=true 才会发送', via: 'cdp', sessionId: targetSid });
-            }
-            const before = db.maxMessageId();
-            await cdp.sendMessage();
-            const hit = db.waitForUserMessage(before, args.message);
-            if (hit.ok) {
-              const payload = { sent: true, verified: true, sessionId: hit.sessionId, messageId: hit.messageId, via: 'cdp' };
-              if (tasksEnabled) {
-                const t = tasks.create({
-                  sessionId: hit.sessionId,
-                  afterMessageId: hit.messageId,
-                  messagePreview: String(args.message).slice(0, 80),
-                });
-                payload.taskId = t.taskId;
-                payload.note = '已创建任务；用 tasks/get 看状态、tasks/result 取结果，完成时会收到 notifications/tasks/status';
+          // 1. 优先走 CDP 零权限高速通道
+          if (!atParsed && await cdp.isAvailable()) {
+            try {
+              await cdp.typeMessage(messageText);
+              if (args.send !== true) {
+                return ok({ sent: false, note: '已通过 CDP 注入未发送；send=true 才会发送', via: 'cdp', sessionId: targetSid });
               }
-              return ok(payload);
-            }
-          } catch (_) {}
-        }
-
-        // 2. 降级走传统的 CoreGraphics 模拟点击与系统剪贴板注入
-        if (!gui.ensureFront()) {
-          return fail('MiniMax 不是活跃应用（你可能正在用别的 App），已放弃操作，避免点到别的窗口');
-        }
-        const overlay = blockedByOverlay(coords.x, coords.y);
-        if (overlay) {
-          return fail(`输入框位置 (${coords.x},${coords.y}) 被别的应用盖住了：${overlay.app} / ${overlay.title || '(无标题)'}。先关掉或移开它，或用 at 指定别的坐标`);
-        }
-        gui.click(coords.x, coords.y);
-        gui.sleep(400);
-        gui.pressKey('a', ['cmd']);
-        gui.sleep(80);
-        gui.clipboard(args.message);
-        gui.sleep(120);
-        gui.pressKey('v', ['cmd']);
-        gui.sleep(700);
-        if (args.send !== true) {
-          return ok({ sent: false, note: '已粘贴未发送；send=true 才会回车', inputAt: coords });
-        }
-        const before = db.maxMessageId();
-        gui.pressKey('return');
-        const hit = db.waitForUserMessage(before, args.message);
-        if (hit.ok) {
-          const payload = { sent: true, verified: true, sessionId: hit.sessionId, messageId: hit.messageId };
-          // 客户端支持 Tasks 扩展时，顺手建一条持久任务，host 可以订阅而不必轮询
-          if (tasksEnabled) {
-            const t = tasks.create({
-              sessionId: hit.sessionId,
-              afterMessageId: hit.messageId,
-              messagePreview: String(args.message).slice(0, 80),
-            });
-            payload.taskId = t.taskId;
-            payload.note = '已创建任务；用 tasks/get 看状态、tasks/result 取结果，完成时会收到 notifications/tasks/status';
-          }
-          return ok(payload);
-        }
-        return ok({
-          sent: true,
-          verified: false,
-          warning: '回车了但数据库里没出现这条消息，大概率没发出去；请截图检查输入框是否还留着文字',
-        });
-      }
-
-      case 'minimax_get_result': {
-        let sid = null;
-        let fallback = false;
-        if (args.sessionId) {
-          sid = db.resolveSession(args.sessionId);
-          // 显式指定了却解析不出来，必须报错。
-          // 悄悄退回"最近活跃会话"会让调用方拿到别人的结果还以为是自己要的——这比报错危险得多。
-          if (!sid) return fail(`找不到会话: ${args.sessionId}`);
-        } else {
-          const recent = db.recentlyTouchedSessions(1)[0] || db.listSessions(1)[0];
-          if (!recent) return fail('找不到会话');
-          sid = recent.sessionId;
-          fallback = true;
-        }
-        const after = Number(args.afterMessageId || 0);
-        const timeout = args.timeoutSeconds !== undefined ? Number(args.timeoutSeconds) : 0;
-        const out = await db.waitForResult(sid, after, timeout, 3000, ctx && ctx.shouldStop);
-        if (fallback) out.note = '没指定 sessionId，用的是最近活跃会话；要精确请显式传 sessionId';
-        return ok(out);
-      }
-
-      case 'minimax_draft_answer': {
-        const detail = db.questionnaireDetail(args.requestId);
-        if (!detail) return fail(`找不到提问: ${args.requestId}`);
-        if (detail.status !== 'pending') {
-          return ok({
-            requestId: detail.requestId,
-            status: detail.status,
-            note: `这条提问已经是 ${detail.status}，不用再答`,
-            answered: detail.answered,
-          });
-        }
-        const suggestion = db.suggestAnswer(detail);
-        return ok({
-          requestId: detail.requestId,
-          sessionId: detail.sessionId,
-          title: detail.title,
-          steps: detail.steps,
-          suggestion,
-          note: '以上是草稿。要提交用 minimax_answer_question，默认也只 preview。',
-        });
-      }
-
-      case 'minimax_answer_question': {
-        const detail = db.questionnaireDetail(args.requestId);
-        if (!detail) return fail(`找不到提问: ${args.requestId}`);
-        if (detail.status !== 'pending') {
-          return fail(`这条提问已经是 ${detail.status}，不能再答`);
-        }
-        const suggestion = db.suggestAnswer(detail);
-        const raw = Array.isArray(args.selections) && args.selections.length
-          ? args.selections
-          : qn.fromSuggestion(suggestion);
-        const { answers, errors } = qn.normalizeSelections(detail, raw);
-        if (errors.length) {
-          return fail(`答案有问题，未提交：\n- ${errors.join('\n- ')}`);
-        }
-        // 防御：问卷没有步骤、或所有步骤都不是必答时，answers 会是空的。
-        // 这时候如果继续走下去，会"点了提交按钮但什么都没选"——比报错更糟。
-        if (!answers.length) {
-          return fail('这条提问解析不出任何可答的步骤，拒绝提交空答案。用 minimax_draft_answer 看看原始结构。');
-        }
-        const payload = qn.buildReplyPayload(detail, answers);
-        const plan = qn.clickPlan(detail, answers);
-
-        // 默认只预览：答了等于替用户做决定，不当默认行为。
-        if (args.preview !== false) {
-          return ok({
-            preview: true,
-            requestId: detail.requestId,
-            sessionId: detail.sessionId,
-            title: detail.title,
-            wouldSubmit: payload,
-            clickPlan: plan,
-            steps: detail.steps,
-            note: 'preview 模式没有做任何操作。要真提交：preview:false + force:true。' +
-              '提交会按 clickPlan 用 OCR 找选项文字并点击，最后找提交按钮，然后核对数据库状态。',
-          });
-        }
-
-        if (args.force !== true) {
-          return fail('这是在替用户做决定。确认要提交就显式加 force:true');
-        }
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        const win = gui.mainWindow();
-        if (!win) return fail('找不到 MiniMax 窗口');
-        const region = args.region || { x: win.x, y: win.y, width: win.width, height: win.height };
-
-        // 逐个点选。每一步都重新 OCR（界面会因为选择而变化）。
-        const clicked = [];
-        const missed = [];
-        for (const step of plan) {
-          const hit = findByAnchor(step.anchor, region);
-          if (!hit) {
-            missed.push({ stepId: step.stepId, anchor: step.anchor, reason: '屏幕上找不到这段文字' });
-            continue;
-          }
-          const overlay = blockedByOverlay(hit.cx, hit.cy);
-          if (overlay) {
-            missed.push({ stepId: step.stepId, anchor: step.anchor, reason: `被 ${overlay.app} 盖住` });
-            continue;
-          }
-          gui.click(hit.cx, hit.cy);
-          clicked.push({ stepId: step.stepId, optionId: step.optionId, at: [hit.cx, hit.cy], text: hit.text, matchedBy: hit.matchedBy });
-          gui.sleep(600);
-          if (step.thenType) {
-            gui.typeText(step.thenType);
-            gui.sleep(300);
-          }
-        }
-
-        if (missed.length) {
-          return ok({
-            submitted: false,
-            clicked,
-            missed,
-            warning: '有选项没点到，已停下（不会盲点提交）。截图确认界面状态，补 at/region 后重试，或手动点完。',
-          });
-        }
-
-        // 有的问卷点完选项就直接提交了，没有独立的提交按钮。
-        // 所以先看数据库状态变没变，变了就别再去找按钮瞎点。
-        const afterClicks = db.questionnaireDetail(detail.requestId);
-        if (afterClicks && afterClicks.status !== 'pending') {
-          return ok({
-            submitted: true,
-            verified: true,
-            status: afterClicks.status,
-            clicked,
-            note: '点选项后状态已变成 ' + afterClicks.status + '，这类问卷是"选中即提交"，不需要再找提交按钮。',
-          });
-        }
-
-        // 找提交按钮：常见文案都试一遍
-        const submitLabels = ['提交', '确定', '确认', '发送', '完成', 'Submit', 'Send'];
-        let submitHit = null;
-        for (const label of submitLabels) {
-          const r = ocr.find(label, { region, refresh: true, mode: 'exact' });
-          if (r.picked) { submitHit = { label, ...r.picked }; break; }
-        }
-        if (!submitHit) {
-          return ok({
-            submitted: false,
-            verified: false,
-            clicked,
-            warning: '选项都点了，但数据库状态还是 pending，也没找到提交按钮（试过：' + submitLabels.join('/') + '）。' +
-              '可能是选中后还需要点别的地方，或者这个界面是"选中即提交但没生效"。' +
-              '用 minimax_screenshot 看当前界面，再用 minimax_click_text 点真正的确认按钮。',
-          });
-        }
-        const submitOverlay = blockedByOverlay(submitHit.cx, submitHit.cy);
-        if (submitOverlay) {
-          return ok({ submitted: false, clicked, warning: `提交按钮被 ${submitOverlay.app} 盖住了` });
-        }
-        gui.click(submitHit.cx, submitHit.cy);
-        gui.sleep(1200);
-
-        // 真验证：数据库里这条提问的状态必须从 pending 变掉
-        const after = db.questionnaireDetail(detail.requestId);
-        const done = after && after.status !== 'pending';
-        return ok({
-          submitted: true,
-          verified: Boolean(done),
-          status: after?.status || 'unknown',
-          clicked,
-          submitAt: [submitHit.cx, submitHit.cy],
-          ...(done ? {} : { warning: '点了提交但数据库里状态还是 pending，可能没提交成功，截图核对' }),
-        });
-      }
-
-      case 'minimax_new_task': {
-        // 1. 优先走 CDP 高速 DOM 切换（免前台唤醒、免 OCR 轮询，亚 50ms 触发）
-        if (await cdp.isAvailable()) {
-          try {
-            const r = await cdp.evaluate(`
-              (() => {
-                const btn = document.querySelector('[data-testid="sidebar-session-group-new-task"], [aria-label="新建任务"], [data-testid="sidebar-shortcut-task.new"]');
-                if (btn) {
-                  btn.click();
-                  return { ok: true, via: 'cdp-button', tag: btn.tagName };
+              const before = db.maxMessageId();
+              await cdp.sendMessage();
+              const hit = db.waitForUserMessage(before, messageText);
+              if (hit.ok) {
+                const payload = { sent: true, verified: true, sessionId: hit.sessionId, messageId: hit.messageId, via: 'cdp' };
+                if (tasksEnabled) {
+                  const t = tasks.create({
+                    sessionId: hit.sessionId,
+                    afterMessageId: hit.messageId,
+                    messagePreview: String(messageText).slice(0, 80),
+                  });
+                  payload.taskId = t.taskId;
+                  payload.note = '已创建任务；用 tasks/get 看状态、tasks/result 取结果，完成时会收到 notifications/tasks/status';
                 }
-                const editor = document.querySelector("[data-testid='message-textarea'], [contenteditable='true'], textarea");
-                if (editor) {
-                  editor.focus();
-                  return { ok: true, via: 'cdp-focus-editor' };
-                }
-                return { ok: false };
-              })()
-            `);
-            if (r && r.ok) {
-              return ok({
-                opened: true,
-                via: r.via,
-                note: '已通过 CDP 快速切换至新建任务页',
-              });
-            }
-          } catch (_) {}
+                return ok(payload);
+              }
+            } catch (_) {}
+          }
+
+          // 2. 降级走 GUI 模拟
+          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+          gui.click(coords.x, coords.y);
+          gui.sleep(300);
+          gui.clipboard(messageText);
+          gui.sleep(100);
+          gui.pressKey('v', ['cmd']);
+          gui.sleep(500);
+          if (args.send !== true) {
+            return ok({ sent: false, note: '已粘贴未发送；send=true 才会发送', inputAt: coords });
+          }
+          const before = db.maxMessageId();
+          gui.pressKey('return');
+          const hit = db.waitForUserMessage(before, messageText);
+          return ok({ sent: true, verified: hit.ok, sessionId: hit.sessionId, messageId: hit.messageId, inputAt: coords });
         }
 
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        const win = gui.mainWindow();
-        if (!win) return fail('找不到 MiniMax 窗口');
-        const region = { x: win.x, y: win.y, width: win.width, height: win.height };
-
-        const before = gui.appWindows().map((w) => `${w.pid}:${w.x},${w.y},${w.width}x${w.height}`).sort();
-        // 记下切换前主区域的文字量。⌘N 多数情况是"同一窗口内换视图"，
-        // 会话页有一大坨消息，新建页只剩问候语 + 占位符，文字量会塌下来。
-        const beforeText = (() => {
-          try { return ocr.read(region).items.map((i) => i.text).join('').length; } catch { return null; }
-        })();
-
-        gui.pressKey('n', ['cmd']);
-        gui.sleep(2500);
-
-        const after = gui.appWindows().map((w) => `${w.pid}:${w.x},${w.y},${w.width}x${w.height}`).sort();
-        const newWindows = after.filter((w) => !before.includes(w));
-        const afterText = (() => {
-          try { return ocr.read(region).items.map((i) => i.text).join('').length; } catch { return null; }
-        })();
-
-        if (newWindows.length) {
-          const m = newWindows[0].match(/^(\d+):(-?[\d.]+),(-?[\d.]+),(\d+)x(\d+)$/);
-          const geo = m ? { x: Number(m[2]), y: Number(m[3]), width: Number(m[4]), height: Number(m[5]) } : null;
-          return ok({
-            opened: true,
-            via: 'new-window',
-            newWindow: newWindows,
-            window: geo,
-            hint: geo ? `新任务页输入框大约在 (${Math.round(geo.x + geo.width * 0.416)}, ${Math.round(geo.y + geo.height * 0.418)})，或直接用 layout:"newtask"` : null,
-          });
-        }
-
-        // 视图切换的判据：主区域文字量掉到原来的一半以下
-        const shrank = beforeText !== null && afterText !== null && beforeText > 40 && afterText < beforeText * 0.5;
-        if (shrank) {
-          const coords = gui.inputCoords(win, null, 'newtask');
-          return ok({
-            opened: true,
-            via: 'view-switch',
-            textBefore: beforeText,
-            textAfter: afterText,
-            window: { x: win.x, y: win.y, width: win.width, height: win.height },
-            hint: `已在同一窗口切到新建任务页（文字量 ${beforeText} → ${afterText}）。` +
-              `输入框估算 (${coords.x},${coords.y})，不准就用 minimax_find_text 找占位符再点。`,
-          });
-        }
-
-        return ok({
-          opened: false,
-          via: 'unknown',
-          textBefore: beforeText,
-          textAfter: afterText,
-          note: '按了 ⌘N 但既没新窗口、主区域文字量也没明显变化。可能焦点不在 MiniMax 输入区，或快捷键被占用——截图确认。',
-          windows: after,
-        });
+        return fail(`未知智能体动作: ${action}`);
       }
 
-      case 'minimax_stop_generation': {
-        // 1. 优先走 CDP 零权限高速终止（直接点击停止按钮或派发 Escape 事件）
-        if (await cdp.isAvailable()) {
-          try {
-            const r = await cdp.evaluate(`
-              (() => {
-                const stopBtn = document.querySelector("[data-testid*='stop'], button[aria-label*='停止'], .stop-button");
-                if (stopBtn && !stopBtn.disabled) {
-                  stopBtn.click();
-                  return { ok: true, via: 'cdp-button' };
-                }
-                window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', which: 27, keyCode: 27, bubbles: true }));
-                return { ok: true, via: 'cdp-escape' };
-              })()
-            `);
-            if (r && r.ok) {
-              return ok({ stopped: true, via: r.via });
-            }
-          } catch (_) {}
-        }
-
-        if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-        gui.pressKey('escape');
-        return ok({ stopped: true, via: 'escape' });
-      }
-
-      case 'minimax_bot_roster': {
+      // ---------- 4. MiniMax Bot 团队协同 (minimax_bot) ----------
+      case 'minimax_bot': {
         const { botClient } = require('../gateway/bot');
-        const roster = botClient.getRoster();
-        return ok(roster);
-      }
+        const action = args.action || (args.text ? 'send' : (args.target ? 'read' : 'roster'));
 
-      case 'minimax_bot_message': {
-        const { botClient } = require('../gateway/bot');
+        if (action === 'roster') {
+          return ok(botClient.getRoster());
+        }
+
         const targetArg = args.target || args.chatId;
         const resolved = botClient.resolveTarget(targetArg, args.mode || 'direct');
-        const action = args.action || (args.text ? 'send' : 'read');
 
         if (action === 'read') {
           const res = await botClient.listMessages(resolved.chatId, args.limit || 20);
           return ok({ target: resolved, ...res });
         }
-
-        if (!args.text) return fail('action=send 时 text 不能为空');
-        const sendText = resolved.prefix ? `${resolved.prefix}${args.text}` : args.text;
-        const res = await botClient.sendMessage(resolved.chatId, sendText);
-        return ok({ target: resolved, text: sendText, ...res });
-      }
-
-      case 'minimax_bot_turn': {
-        const { botClient } = require('../gateway/bot');
-        const targetArg = args.target || args.chatId;
-        const resolved = botClient.resolveTarget(targetArg, 'direct');
-        const action = args.action;
-
+        if (action === 'send') {
+          if (!args.text) return fail('action=send 时 text 不能为空');
+          const sendText = resolved.prefix ? `${resolved.prefix}${args.text}` : args.text;
+          const res = await botClient.sendMessage(resolved.chatId, sendText);
+          return ok({ target: resolved, text: sendText, ...res });
+        }
         if (action === 'cancel') {
           const res = await botClient.cancelTurn(resolved.chatId);
           return ok({ target: resolved, action, ...res });
         }
-        if (action === 'resume_pending') {
+        if (action === 'resume') {
           const res = await botClient.resumePending(resolved.chatId);
           return ok({ target: resolved, action, ...res });
         }
@@ -746,16 +384,198 @@ async function dispatch(name, args = {}, ctx = null) {
           const res = await botClient.answerQuestion(resolved.chatId, args.messageId, args.answers);
           return ok({ target: resolved, action, ...res });
         }
-        return fail(`未知 Bot 轮次动作: ${action}`);
+
+        return fail(`未知 Bot 操作类型: ${action}`);
       }
 
-      case 'minimax_auto_resume': {
-        const { autoResume } = require('../gateway/resume');
-        const dryRun = args.dryRun !== false;
-        const limit = args.limit || 5;
-        const res = await autoResume({ dryRun, limit, sessionId: args.sessionId });
-        return ok(res);
+      // ---------- 5. 人工问卷与卡片管理 (minimax_questionnaire) ----------
+      case 'minimax_questionnaire': {
+        const action = args.action || (args.selections || args.force !== undefined ? 'answer' : (args.requestId || args.id ? 'draft' : 'list'));
+
+        if (action === 'list') {
+          return ok({ pending: db.pending() });
+        }
+
+        const reqId = args.requestId || args.id;
+        if (!reqId) return fail('action=draft 或 answer 时缺少 requestId');
+
+        const detail = db.questionnaireDetail(reqId);
+        if (!detail) return fail(`找不到提问: ${reqId}`);
+
+        if (action === 'draft') {
+          if (detail.status !== 'pending') {
+            return ok({
+              requestId: detail.requestId,
+              status: detail.status,
+              note: `这条提问已经是 ${detail.status}，不用再答`,
+              answered: detail.answered,
+            });
+          }
+          const suggestion = db.suggestAnswer(detail);
+          return ok({
+            requestId: detail.requestId,
+            sessionId: detail.sessionId,
+            title: detail.title,
+            steps: detail.steps,
+            suggestion,
+            note: '以上是草稿。要提交用 action="answer"，默认也只 preview。',
+          });
+        }
+
+        if (action === 'answer') {
+          if (detail.status !== 'pending') return fail(`这条提问已经是 ${detail.status}，不能再答`);
+          const suggestion = db.suggestAnswer(detail);
+          const raw = Array.isArray(args.selections) && args.selections.length
+            ? args.selections
+            : qn.fromSuggestion(suggestion);
+          const { answers, errors } = qn.normalizeSelections(detail, raw);
+          if (errors.length) return fail(`答案有问题，未提交：\n- ${errors.join('\n- ')}`);
+          if (!answers.length) return fail('这条提问解析不出任何可答的步骤，拒绝提交空答案。');
+
+          const payload = qn.buildReplyPayload(detail, answers);
+          const plan = qn.clickPlan(detail, answers);
+
+          if (args.preview !== false) {
+            return ok({
+              preview: true,
+              requestId: detail.requestId,
+              sessionId: detail.sessionId,
+              title: detail.title,
+              wouldSubmit: payload,
+              clickPlan: plan,
+              steps: detail.steps,
+              note: 'preview 模式未实际提交。确认提交加 preview:false, force:true。',
+            });
+          }
+
+          if (args.force !== true) return fail('这是在替用户做决定。确认要提交就显式加 force:true');
+          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
+          const win = gui.mainWindow();
+          if (!win) return fail('找不到 MiniMax 窗口');
+          const region = { x: win.x, y: win.y, width: win.width, height: win.height };
+
+          const clicked = [];
+          for (const step of plan) {
+            const hit = ocr.find(step.anchor, { region, refresh: true, mode: 'contains' })?.picked;
+            if (hit) {
+              gui.click(hit.cx, hit.cy);
+              clicked.push({ stepId: step.stepId, at: [hit.cx, hit.cy] });
+              gui.sleep(500);
+            }
+          }
+
+          const submitHit = ocr.find('确定', { region, refresh: true, mode: 'exact' })?.picked
+            || ocr.find('提交', { region, refresh: true, mode: 'exact' })?.picked;
+          if (submitHit) {
+            gui.click(submitHit.cx, submitHit.cy);
+            gui.sleep(1000);
+          }
+
+          const after = db.questionnaireDetail(detail.requestId);
+          return ok({
+            submitted: true,
+            verified: Boolean(after && after.status !== 'pending'),
+            status: after?.status || 'unknown',
+            clicked,
+          });
+        }
+
+        return fail(`未知问卷操作: ${action}`);
       }
+
+      // ---------- 6. 桌面环境与窗口控制 (minimax_desktop) ----------
+      case 'minimax_desktop': {
+        const action = args.action || (args.mode || args.width ? 'screenshot' : (args.windows ? 'windows' : 'activate'));
+
+        if (action === 'windows') {
+          const onScreen = gui.appWindows();
+          const all = gui.windowsAll().filter((w) => w.app === gui.APP);
+          const hidden = all.filter((w) => !onScreen.some((o) => o.pid === w.pid && o.x === w.x));
+          return ok({
+            onScreenCount: onScreen.length,
+            windows: onScreen,
+            hiddenOrOtherSpace: hidden.map((w) => ({ pid: w.pid, x: w.x, y: w.y, width: w.width, height: w.height, title: w.title })),
+          });
+        }
+
+        if (action === 'screenshot') {
+          const region = args.mode === 'region'
+            ? { x: args.x, y: args.y, width: args.width, height: args.height }
+            : null;
+          if (args.mode === 'region' && (!region || [region.x, region.y, region.width, region.height].some((v) => typeof v !== 'number'))) {
+            return fail('mode=region 需要同时提供 x/y/width/height');
+          }
+
+          if (await cdp.isAvailable() && args.mode !== 'region') {
+            try {
+              const outDir = path.join(__dirname, '..', '..', 'scripts', 'screenshots');
+              fs.mkdirSync(outDir, { recursive: true });
+              const safe = String(args.name || 'minimax').replace(/[^\w.-]+/g, '_').slice(0, 40) || 'minimax';
+              const targetPath = path.join(outDir, `${safe}_${Date.now()}.png`);
+              const res = await cdp.captureScreenshot(targetPath);
+              if (res && res.path) {
+                return ok({ path: res.path, bytes: res.bytes, via: 'cdp' });
+              }
+            } catch (_) {}
+          }
+          return ok(gui.screenshot(args.name || 'minimax', args.mode || 'screen', region));
+        }
+
+        if (action === 'activate') {
+          if (args.relaunchWithDebug) {
+            const { launchWithDebug } = require(path.join(__dirname, '..', '..', 'scripts', 'launch-with-debug'));
+            const r = await launchWithDebug();
+            if (!r.ok) return fail(`挂载调试端口重启失败: ${r.error}`);
+            return ok({ relaunchWithDebug: true, cdp: r, window: gui.mainWindow() });
+          }
+          if (await cdp.isAvailable()) {
+            try {
+              const r = await cdp.bringToFront();
+              if (r && r.ok) return ok({ via: 'cdp', note: '已通过 CDP 将 MiniMax 唤醒至前台' });
+            } catch (_) {}
+          }
+          gui.openApp();
+          return ok({ via: 'gui-open', window: gui.mainWindow() });
+        }
+
+        return fail(`未知桌面操作: ${action}`);
+      }
+
+      // ---------- 7. 遗留别名透明映射 (Backward Compatibility) ----------
+      case 'minimax_list_sessions':
+        return await dispatch('minimax_session', { action: 'list', ...args }, ctx);
+      case 'minimax_read_session':
+        return await dispatch('minimax_session', { action: 'read', ...args }, ctx);
+      case 'minimax_tail_sessions':
+        return await dispatch('minimax_session', { action: 'tail', ...args }, ctx);
+      case 'minimax_search':
+        return await dispatch('minimax_session', { action: 'search', ...args }, ctx);
+      case 'minimax_send_message':
+        return await dispatch('minimax_agent', { action: 'send', ...args }, ctx);
+      case 'minimax_get_result':
+        return await dispatch('minimax_agent', { action: 'result', ...args }, ctx);
+      case 'minimax_stop_generation':
+        return await dispatch('minimax_agent', { action: 'stop', ...args }, ctx);
+      case 'minimax_new_task':
+        return await dispatch('minimax_agent', { action: 'new', ...args }, ctx);
+      case 'minimax_bot_roster':
+        return await dispatch('minimax_bot', { action: 'roster', ...args }, ctx);
+      case 'minimax_bot_message':
+        return await dispatch('minimax_bot', { action: args.action || (args.text ? 'send' : 'read'), ...args }, ctx);
+      case 'minimax_bot_turn':
+        return await dispatch('minimax_bot', args, ctx);
+      case 'minimax_pending':
+        return await dispatch('minimax_questionnaire', { action: 'list', ...args }, ctx);
+      case 'minimax_draft_answer':
+        return await dispatch('minimax_questionnaire', { action: 'draft', ...args }, ctx);
+      case 'minimax_answer_question':
+        return await dispatch('minimax_questionnaire', { action: 'answer', ...args }, ctx);
+      case 'minimax_activate':
+        return await dispatch('minimax_desktop', { action: 'activate', ...args }, ctx);
+      case 'minimax_screenshot':
+        return await dispatch('minimax_desktop', { action: 'screenshot', ...args }, ctx);
+      case 'minimax_windows':
+        return await dispatch('minimax_desktop', { action: 'windows', ...args }, ctx);
 
       default:
         return fail(`未知工具: ${name}`);
@@ -765,34 +585,84 @@ async function dispatch(name, args = {}, ctx = null) {
   }
 }
 
+const LEGACY_MAP = {
+  minimax_list_sessions: (a) => ({ name: 'minimax_session', args: { action: 'list', ...a } }),
+  minimax_read_session: (a) => ({ name: 'minimax_session', args: { action: 'read', ...a } }),
+  minimax_tail_sessions: (a) => ({ name: 'minimax_session', args: { action: 'tail', ...a } }),
+  minimax_search: (a) => ({ name: 'minimax_session', args: { action: 'search', ...a } }),
+  minimax_send_message: (a) => ({ name: 'minimax_agent', args: { action: 'send', ...a } }),
+  minimax_get_result: (a) => ({ name: 'minimax_agent', args: { action: 'result', ...a } }),
+  minimax_stop_generation: (a) => ({ name: 'minimax_agent', args: { action: 'stop', ...a } }),
+  minimax_new_task: (a) => ({ name: 'minimax_agent', args: { action: 'new', ...a } }),
+  minimax_bot_roster: (a) => ({ name: 'minimax_bot', args: { action: 'roster', ...a } }),
+  minimax_bot_message: (a) => ({ name: 'minimax_bot', args: { action: a.action || (a.text ? 'send' : 'read'), ...a } }),
+  minimax_bot_turn: (a) => ({ name: 'minimax_bot', args: a }),
+  minimax_pending: (a) => ({ name: 'minimax_questionnaire', args: { action: 'list', ...a } }),
+  minimax_draft_answer: (a) => ({ name: 'minimax_questionnaire', args: { action: 'draft', ...a } }),
+  minimax_answer_question: (a) => ({ name: 'minimax_questionnaire', args: { action: 'answer', ...a } }),
+  minimax_activate: (a) => ({ name: 'minimax_desktop', args: { action: 'activate', ...a } }),
+  minimax_screenshot: (a) => ({ name: 'minimax_desktop', args: { action: 'screenshot', ...a } }),
+  minimax_windows: (a) => ({ name: 'minimax_desktop', args: { action: 'windows', ...a } }),
+};
+
 /**
- * 对外入口：先分发，再按风险级别决定要不要落审计。
- * 审计放在最外层，保证"调了但抛错"也留下记录——那种情况恰恰最需要回溯。
+ * 对外入口：参数归一化、Schema 校验、分发与审计。
  */
 async function callTool(name, args = {}, ctx = null) {
   const started = Date.now();
+  const callerName = name;
 
-  // 入参别名按工具精准归一化：抹平不同大模型（Claude/Gemini/GPT/开源模型）命名习惯差异，且不污染其他工具
+  if (LEGACY_MAP[name]) {
+    const mapped = LEGACY_MAP[name](args);
+    name = mapped.name;
+    args = mapped.args;
+  }
+
+  // 入参别名按工具精准归一化
   if (args && typeof args === 'object') {
-    if (name === 'minimax_read_session' || name === 'minimax_get_result' || name === 'minimax_stop_generation') {
+    if (name === 'minimax_session') {
       if (args.sessionId && !args.session) args.session = args.sessionId;
-      if (args.session && !args.sessionId) args.sessionId = args.session;
-    } else if (name === 'minimax_send_message') {
+      if (args.q && !args.query) args.query = args.q;
+      if (!args.action) {
+        if (args.session || args.sessionId) args.action = 'read';
+        else if (args.query || args.q) args.action = 'search';
+        else if (args.count || args.perSession) args.action = 'tail';
+        else args.action = 'list';
+      }
+    } else if (name === 'minimax_agent') {
       if (args.text && !args.message) args.message = args.text;
       if (args.content && !args.message) args.message = args.content;
       if (args.session && !args.sessionId) args.sessionId = args.session;
-    } else if (name === 'minimax_search') {
-      if (args.q && !args.query) args.query = args.q;
-      if (args.keyword && !args.query) args.query = args.keyword;
-    } else if (name === 'minimax_draft_answer' || name === 'minimax_answer_question') {
-      if (args.id && !args.requestId) args.requestId = args.id;
-    } else if (name === 'minimax_bot_message' || name === 'minimax_bot_turn') {
+      if (!args.action) {
+        if (args.message || args.text || args.content) args.action = 'send';
+        else if (args.afterMessageId || args.timeoutSeconds !== undefined) args.action = 'result';
+        else args.action = 'send';
+      }
+    } else if (name === 'minimax_bot') {
       if (args.chatId && !args.target) args.target = args.chatId;
       if (args.target && !args.chatId) args.chatId = args.target;
+      if (!args.action) {
+        if (args.text) args.action = 'send';
+        else if (args.target) args.action = 'read';
+        else args.action = 'roster';
+      }
+    } else if (name === 'minimax_questionnaire') {
+      if (args.id && !args.requestId) args.requestId = args.id;
+      if (!args.action) {
+        if (args.selections || args.force !== undefined) args.action = 'answer';
+        else if (args.requestId || args.id) args.action = 'draft';
+        else args.action = 'list';
+      }
+    } else if (name === 'minimax_desktop') {
+      if (!args.action) {
+        if (args.mode || args.width) args.action = 'screenshot';
+        else if (args.relaunchWithDebug !== undefined) args.action = 'activate';
+        else args.action = 'activate';
+      }
     }
   }
 
-  // 先用工具自己的 schema 挡一道。参数错就立刻报清楚，别让它变成 NaN 点歪坐标。
+  // 工具 Schema 校验
   const tool = TOOLS.find((t) => t.name === name);
   if (tool) {
     const v = validateArgs(tool, args);
@@ -806,10 +676,11 @@ async function callTool(name, args = {}, ctx = null) {
   try {
     result = await dispatch(name, args, ctx);
   } catch (err) {
-    if (ann.needsAudit(name)) {
+    const auditTool = ann.needsAudit(callerName) ? callerName : name;
+    if (ann.needsAudit(auditTool)) {
       audit.record({
-        tool: name,
-        level: ann.levelOf(name),
+        tool: auditTool,
+        level: ann.levelOf(auditTool),
         args,
         ok: false,
         ms: Date.now() - started,
@@ -818,11 +689,12 @@ async function callTool(name, args = {}, ctx = null) {
     }
     throw err;
   }
-  if (ann.needsAudit(name)) {
+  const auditTool = ann.needsAudit(callerName) ? callerName : name;
+  if (ann.needsAudit(auditTool)) {
     const payload = parsePayload(result);
     audit.record({
-      tool: name,
-      level: ann.levelOf(name),
+      tool: auditTool,
+      level: ann.levelOf(auditTool),
       args,
       ok: result && result.isError !== true,
       ms: Date.now() - started,
@@ -833,9 +705,9 @@ async function callTool(name, args = {}, ctx = null) {
     });
   }
   return result;
+  return result;
 }
 
-/** 从工具返回的 JSON 文本里取几个字段，取不到就算了。 */
 function parsePayload(result) {
   try {
     return JSON.parse(result.content[0].text);

@@ -8,6 +8,7 @@
 const readline = require('node:readline');
 const { TOOLS } = require('./tools');
 const { SERVER_INFO, PROTOCOL_VERSIONS } = require('./contract');
+const { LEVEL } = require('./annotations');
 const { callTool, setTasksEnabled } = require('./handler');
 const tasks = require('./tasks');
 
@@ -126,7 +127,7 @@ async function handle(message, ctx = CTX) {
     if (!name) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: '缺少 params.name' } };
     }
-    const known = TOOLS.some((t) => t.name === name);
+    const known = TOOLS.some((t) => t.name === name) || Object.prototype.hasOwnProperty.call(LEVEL, name);
     if (!known) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: `未知工具: ${name}` } };
     }
