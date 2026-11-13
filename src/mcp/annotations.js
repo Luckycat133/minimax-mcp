@@ -23,7 +23,6 @@ const LEVEL = {
   minimax_agent: 'commit',
   minimax_bot: 'commit',
   minimax_questionnaire: 'commit',
-  minimax_auto_resume: 'commit',
   minimax_watch: 'commit',
 
   // 兼容别名（遗留接口无缝过渡）
@@ -54,7 +53,6 @@ const GATES = {
   minimax_agent: 'send 默认 false；另有活跃守卫，最近 300s 内有会话活动就拒绝；action=result 时只读',
   minimax_bot: 'action=roster/read 时只读；action=send 时需显式提供 text 内容；action=answer 时需提交具体答案',
   minimax_questionnaire: 'action=list/draft 时只读；action=answer 时 preview 默认 true，真实提交需 preview:false + force:true',
-  minimax_auto_resume: 'dryRun 默认 true；只有显式 dryRun:false 才会触发恢复操作',
   minimax_watch: 'mode 默认 act 但只动低风险：仅当风险=low 且有推荐答案、人离开 ≥minIdleSeconds、每轮最多 maxActionsPerTick 个动作',
 
   // 兼容别名闸门

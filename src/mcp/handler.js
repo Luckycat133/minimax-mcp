@@ -127,10 +127,6 @@ async function dispatch(name, args = {}, ctx = null) {
               headline: br.headline,
               pendingQuestions: pending.length,
               stalledSessions: (br.items || []).filter((it) => it.kind === 'stalled').length,
-              autoResume: {
-                active: true,
-                note: '网关后台已就绪：额度刷新后自动解除挂起并续传，无需人工触发',
-              },
             };
           } catch (_) {}
         }

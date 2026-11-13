@@ -177,19 +177,6 @@ const INTERNAL_TOOLS = [
     },
   },
   {
-    name: 'minimax_auto_resume',
-    description: '智能断点续传：自动识别因额度耗尽(2056)或渠道熔断而挂起的会话，在额度恢复后自动继续（原生对话点继续，Bot 对话推进轮次）。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        dryRun: { type: 'boolean', default: true, description: '是否只扫描计划而不实际触发' },
-        limit: { type: 'integer', minimum: 1, maximum: 20, default: 5, description: '单次最多恢复会话数' },
-        sessionId: { type: 'string', description: '指定恢复某个会话 ID' },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
     name: 'minimax_watch',
     description: '周期巡检：比对快照产出事件，可按安全策略自动处理低风险问卷。dryRun=true 仅预览。',
     inputSchema: {

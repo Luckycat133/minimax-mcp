@@ -12,7 +12,7 @@
       "input": {
         "includeBrief": "boolean, 默认 true, 是否包含注意力队列概况"
       },
-      "output": "app{running,pid}, cdp{online,port}, quota{isLimited,refreshAtMs,waitSeconds,countdownText}, attention{headline,pendingQuestions,stalledSessions,autoResume}, database{path,sessions,messages}",
+      "output": "app{running,pid}, cdp{online,port}, quota{isLimited,refreshAtMs,waitSeconds,countdownText}, attention{headline,pendingQuestions,stalledSessions}, database{path,sessions,messages}",
       "sideEffects": "none（纯读状态）"
     },
     {

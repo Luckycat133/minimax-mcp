@@ -1,6 +1,6 @@
 ---
 name: minimax-mcp
-description: "Operate, monitor, diagnose, and auto-resume MiniMax Code on macOS via minimax-mcp. Use whenever inspecting MiniMax session progress, checking brief status, auto-resuming paused queues after quota refresh, healing Telegram channel deadlocks, drafting questionnaire answers, sending prompts, or interacting with MiniMax desktop agents with minimal token consumption."
+description: "Operate and monitor MiniMax Code on macOS via minimax-mcp. Use whenever inspecting MiniMax session progress, checking status and quota, sending prompts to native agent harness, collaborating with MiniMax Bot Studio teams, or answering interactive question cards with minimal token consumption."
 license: MIT
 metadata:
   author: minimax-mcp
@@ -19,19 +19,19 @@ metadata:
 
 ---
 
-## 核心理念：AI 专注对话与调度，底层全自动守护
+## 核心理念：AI 专注对话与任务调度，底层自动接管 UI 与会话
 
 对外部 AI 而言，操作 MiniMax 的核心需求非常纯粹：
-1. **查看状态与额度**：确认 MiniMax 与 CDP 就绪态，了解剩余额度与刷新倒计时；
+1. **查看状态与额度**：确认 MiniMax 运行状态、CDP 9223 端口是否在线、查看 Token 额度与刷新倒计时；
 2. **查找与精读对话**：先在本地 SQLite 找会话、翻历史、搜索上下文；
 3. **分对象调度对话**：
-   - 与**原生工作区智能体**对话（在工作区下发任务指令、自动切会话并等待产出）；
+   - 与**原生工作区智能体**对话（让 MiniMax 在自己的工作区 harness 里跑任务，下发指令并等待结果）；
    - 与 **MiniMax Bot 团队**对话（向「剪辑师」「导演」等专家或群聊发指令、读回复）；
 4. **人工卡片与问卷应答**：处理 MiniMax 提出的人工决策卡片。
 
-> [!IMPORTANT]
-> **断点自动续传（Auto-Resume）与周期巡检完全由网关后台代码全自动静默执行**：
-> 外部 AI 无需调用任何续传工具。网关守护进程会根据 CDP 额度刷新倒计时与本地队列暂停状态，在额度重置后秒级自动解除挂起并恢复执行（原生对话点继续、Bot 对话推进轮次、渠道解除暂停），实现真正的全自动无人值守。
+> [!NOTE]
+> **全自动 UI 与会话接管**：
+> MiniMax 是一个在自身 Harness 里运行的 Agent 容器。本 MCP 负责让外部 Agent 能够自动化调度它：会话切换、窗口激活、文本注入与发送均由底层代码通过 CDP / GUI 全自动完成，外部 Agent 零物理坐标感知。当额度耗尽时，直接通过 `minimax_status` 了解刷新倒计时，并在额度恢复后继续推进任务。
 
 ---
 
@@ -66,8 +66,7 @@ minimax_status({})
   },
   "attention": {
     "headline": "都很安静（24 个会话没有新动静）",
-    "pendingQuestions": 0,
-    "autoResume": { "active": true, "note": "网关后台已就绪：额度刷新后自动解除挂起并续传" }
+    "pendingQuestions": 0
   }
 }
 ```
@@ -138,5 +137,5 @@ minimax_questionnaire({
    `minimax_agent` 发送消息前会检测目标会话是否在最近 300 秒内有活动。若人类用户正在打字操作，工具会主动拒绝发送并报错，避免干扰用户正常工作；如需强行推进可显式设置 `force: true`。
 2. **预览优先策略**：
    所有高风险写入操作（`send`、`answer`）默认均为预览模式（`send: false` 或 `preview: true`），只有明确声明动作参数才会真实提交修改。
-3. **网关静默续传自愈**：
-   即使外部 Agent 离线，网关守护进程依然常驻运行。当触发额度限制错误（2056 或 42212）时，网关守护进程会自动记录挂起会话；一旦额度重置倒计时结束，网关会自动解除挂起继续执行，无需消耗外部 Agent 的 Token。
+3. **零坐标暴露与 CDP 极速通信**：
+   所有会话切换与输入均优先走 CDP 9223 端口直接与渲染进程通信，亚毫秒级响应，外部无需安装或维护任何辅助功能点击坐标。
