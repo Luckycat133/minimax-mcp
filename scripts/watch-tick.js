@@ -15,11 +15,20 @@
  */
 
 const path = require('node:path');
+const { execSync } = require('node:child_process');
 const { callTool } = require(path.join(__dirname, '..', 'src/mcp/handler'));
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const quiet = args.includes('--quiet');
+
+// 极速前置门禁：MiniMax Code 进程未运行时秒级退出，杜绝空转消耗电量与 CPU
+try {
+  execSync('pgrep -f "MiniMax Code"', { stdio: 'ignore' });
+} catch {
+  if (!quiet) console.log('MiniMax Code 未在运行，跳过本次巡检');
+  process.exit(0);
+}
 
 // 从环境变量读策略，方便在不改代码的前提下调
 const policy = {};
@@ -55,10 +64,11 @@ async function main() {
   for (const a of r.actions) console.log(`  > ${a.tool} ${a.planned ? '(计划)' : a.ok ? '✓' : '✗'} ${a.why || ''}`);
   if (resumeRes?.results?.length) {
     for (const s of resumeRes.results) {
-      console.log(`  ↻ 续传 [${s.type}] ${s.sessionId} (${s.title}): ${s.action} ${s.ok ? '✓' : s.skipped ? '↷' : '✗'}`);
+      console.log(`  ↻ 续传 [${s.type}] ${s.sessionId} (${s.title}): ${s.action} ${s.planned ? '⚙' : s.ok ? '✓' : s.skipped ? '↷' : '✗'}`);
     }
   }
   for (const n of r.needsHuman) console.log(`  ! 需要人：${n.title || n.sessionId} — ${n.why || n.reason}`);
+  process.exit(0);
 }
 
 main().catch((err) => {

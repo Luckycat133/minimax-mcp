@@ -170,14 +170,19 @@ async function autoResume({ dryRun = true, limit = 5, sessionId = null } = {}) {
     for (const s of targetSessions) {
       if (actionCount >= limit) break;
       const lastResumedAt = history.resumed[s.sessionId] || 0;
-      // 冷却保护：1 小时内对同一会话不重复自动唤醒（除非指定 sessionId）
-      if (!sessionId && Date.now() - lastResumedAt < 3600 * 1000) {
+      // 智能冷却保护：
+      // 1. 若会话在上次恢复后有新消息、新状态变更或新发生熔断（updated/paused > lastResumedAt），立即放行；
+      // 2. 否则保持 180 秒（3 分钟）防重抖动冷却，避免短时间内同一会话反复重试；
+      // 3. 显式传 sessionId 或处于 dryRun 预览时不拦截。
+      const hasNewActivity = (s.updatedAtMs && s.updatedAtMs > lastResumedAt) || (s.pausedAtMs && s.pausedAtMs > lastResumedAt);
+      const inCooldown = !sessionId && !dryRun && !hasNewActivity && (Date.now() - lastResumedAt < 180 * 1000);
+      if (inCooldown) {
         results.push({
           sessionId: s.sessionId,
           title: s.title,
           type: s.type,
           skipped: true,
-          reason: '该会话已在当前周期内恢复过（冷却中）',
+          reason: '该会话已在当前周期内恢复过（冷却中，剩余 ' + Math.ceil((180 * 1000 - (Date.now() - lastResumedAt)) / 1000) + 's）',
         });
         continue;
       }
