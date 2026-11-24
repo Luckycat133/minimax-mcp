@@ -210,3 +210,8 @@ node scripts/install-watch-agent.js --uninstall   # 卸载守护进程
 ## 📄 开源许可证
 
 本项目采用 [MIT 许可证](LICENSE)。
+
+## 文档与变更记录
+
+- 变更记录：[CHANGELOG.md](CHANGELOG.md)
+- 文档索引：[docs/README.md](docs/README.md)
