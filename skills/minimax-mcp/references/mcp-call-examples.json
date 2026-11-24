@@ -1,165 +1,17 @@
 {
-  "note": "JSON-RPC over stdio，一行一条。examples 按常见诉求排序。",
+  "note": "Safe diagnostic examples, not a script to run unconditionally. Replace placeholder IDs with full IDs from authorized reads. Schema-compatible does not prove runtime safety. watch dryRun still writes local state/report files. No examples authorize Bot sends, GUI clicks or unattended commits.",
+  "sourceCommit": "ed3283266b32d395ed17282cc8b848a2d9ed9088",
   "examples": [
-    {
-      "intent": "巡检所有会话的最新进展",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_tail_sessions",
-            "arguments": {
-              "count": 6,
-              "perSession": 2
-            }
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_pending",
-            "arguments": {}
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_tasks",
-            "arguments": {
-              "status": "running"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "intent": "读某个会话的完整上下文",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_read_session",
-            "arguments": {
-              "session": "3",
-              "limit": 30,
-              "includeThinking": false
-            }
-          }
-        }
-      ]
-    },
-    {
-      "intent": "往当前会话推一句话（先不发送）",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_send_message",
-            "arguments": {
-              "message": "继续，把剩下的跑完给我结论",
-              "send": false
-            }
-          }
-        }
-      ]
-    },
-    {
-      "intent": "发送前先预览（只读，报告坐标/遮挡/守卫）",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_send_message",
-            "arguments": {
-              "message": "…",
-              "send": true,
-              "preview": true
-            }
-          }
-        }
-      ],
-      "expect": "preview=true，含 inputAt / overlay / activeApp / guard；没有任何点击或输入"
-    },
-    {
-      "intent": "发送并确认入库",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_send_message",
-            "arguments": {
-              "message": "继续，把剩下的跑完给我结论",
-              "send": true,
-              "layout": "chat"
-            }
-          }
-        }
-      ],
-      "expect": "verified=true 且带 sessionId/messageId；verified=false 表示没发出去",
-      "note": "若当前会话不久前还在活动会被守卫拒绝；确认要发加 force:true，或调大 quietSeconds"
-    },
-    {
-      "intent": "新建任务页输入（输入框在页面中部）",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_key",
-            "arguments": {
-              "key": "n",
-              "modifiers": [
-                "cmd"
-              ]
-            }
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_send_message",
-            "arguments": {
-              "message": "任务内容",
-              "send": true,
-              "layout": "newtask"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "intent": "截图看界面，再按坐标点按钮",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_screenshot",
-            "arguments": {
-              "mode": "screen",
-              "name": "check"
-            }
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_click",
-            "arguments": {
-              "x": 678,
-              "y": 597
-            }
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_screenshot",
-            "arguments": {
-              "mode": "screen",
-              "name": "after"
-            }
-          }
-        }
-      ]
-    }
+    {"intent":"首先定位需要关注的事项","calls":[{"method":"tools/call","params":{"name":"minimax_brief","arguments":{"limit":50}}}]},
+    {"intent":"只读取目标会话最近必要上下文","calls":[{"method":"tools/call","params":{"name":"minimax_read_session","arguments":{"session":"mvs_REPLACE_WITH_FULL_ID","limit":10,"includeThinking":false}}}],"note":"ID must come from an authorized read; do not use unstable list ordinals for actions."},
+    {"intent":"小范围检索","calls":[{"method":"tools/call","params":{"name":"minimax_search","arguments":{"query":"待核对的关键词","limit":5}}}]},
+    {"intent":"查看待答问卷并读取完整草稿","calls":[{"method":"tools/call","params":{"name":"minimax_pending","arguments":{}}},{"method":"tools/call","params":{"name":"minimax_draft_answer","arguments":{"requestId":"ask_REPLACE_WITH_REQUEST_ID"}}}],"note":"Choose the actual requestId after inspecting pending; recommended/first-option suggestions are not user approval."},
+    {"intent":"仅预览已检查的选项，不提交","calls":[{"method":"tools/call","params":{"name":"minimax_answer_question","arguments":{"requestId":"ask_REPLACE_WITH_REQUEST_ID","selections":[{"stepId":"REPLACE_WITH_STEP_ID","optionIds":["REPLACE_WITH_OPTION_ID"]}],"preview":true,"force":false}}}],"note":"Load all required steps/options first; never submit from incomplete or truncated context."},
+    {"intent":"预览发送目标状态，不输入或发送","calls":[{"method":"tools/call","params":{"name":"minimax_send_message","arguments":{"message":"合成诊断文本，不含秘密","send":false,"preview":true,"force":false}}}],"note":"Preview does not establish an atomic session binding. Do not follow it automatically with send=true."},
+    {"intent":"仅查看巡检器状态","calls":[{"method":"tools/call","params":{"name":"minimax_watch","arguments":{"action":"status"}}}]},
+    {"intent":"诊断 tick：同时声明 dryRun 和 observe","calls":[{"method":"tools/call","params":{"name":"minimax_watch","arguments":{"action":"tick","dryRun":true,"policy":{"mode":"observe"}}}}],"note":"observe alone is insufficient in the current implementation: the tail auto-resume branch bypasses mode. dryRun prevents desktop/Bot actions but persists local state, events and report."},
+    {"intent":"读取明确 Bot 群的有限历史","calls":[{"method":"tools/call","params":{"name":"minimax_bot_message","arguments":{"action":"read","chatId":"group:REPLACE_WITH_AUTHORIZED_GROUP_ID","limit":10}}}],"note":"Never rely on the hardcoded default group or default send action."},
+    {"intent":"只预览某会话的额度恢复候选","calls":[{"method":"tools/call","params":{"name":"minimax_auto_resume","arguments":{"dryRun":true,"limit":1,"sessionId":"mvs_REPLACE_WITH_FULL_ID"}}}],"note":"quotaAvailable is not sufficient proof when probing failed. No resume is authorized by this example."},
+    {"intent":"增量读取巡检事件","calls":[{"method":"tools/call","params":{"name":"minimax_events","arguments":{"since":"2026-11-14T00:00:00Z","limit":20}}}]}
   ]
 }
