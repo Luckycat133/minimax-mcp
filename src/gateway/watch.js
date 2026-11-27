@@ -379,13 +379,18 @@ async function tick(opts = {}) {
       });
       actionBudget -= 1;
       const payload = safePayload(res);
+      const verified = payload?.verified === true;
       actions.push({
         tool: 'minimax_answer_question',
         args: { requestId: q.requestId },
         why: decision.why,
-        ok: res && res.isError !== true,
-        verified: payload ? payload.verified : null,
+        ok: verified,
+        verified,
         status: payload ? payload.status : null,
+      });
+      if (!verified) needsHuman.push({
+        sessionId: sid, requestId: q.requestId,
+        reason: payload?.error || payload?.note || '问卷提交待确认',
       });
       emit({
         key: `auto_answer:${q.requestId}`,
@@ -393,7 +398,7 @@ async function tick(opts = {}) {
         type: 'auto_action',
         sessionId: sid,
         title: q.question.slice(0, 60),
-        detail: `已代答（${decision.risk.level}）：${payload && payload.verified ? '数据库已确认' : '未能确认'}`,
+        detail: verified ? '问卷已代答并入库' : '问卷提交未确认',
         requestId: q.requestId,
       });
     } else if (decision.action === 'ask_human') {
@@ -447,14 +452,15 @@ async function tick(opts = {}) {
       continue;
     }
     const res = await execute('minimax_send_message', {
+      sessionId: item.sessionId,
       message: policy.autoNudge.message,
       send: true,
-      force: true,
     });
     actionBudget -= 1;
     const payload = safePayload(res);
-    if (payload && payload.sessionId) {
-      // 催话会插进当前会话，标记一下冷却时间
+    const verified = payload?.verified === true;
+    if (payload?.sessionId) {
+      // 已尝试提交时进入冷却，避免在确认前重复发送。
       if (!state.sessions[payload.sessionId]) state.sessions[payload.sessionId] = {};
       state.sessions[payload.sessionId].nudgedAt = now;
     }
@@ -462,16 +468,17 @@ async function tick(opts = {}) {
       tool: 'minimax_send_message',
       args: { sessionId: item.sessionId },
       why: decision.why,
-      ok: res && res.isError !== true,
-      verified: payload ? payload.verified : null,
+      ok: verified,
+      verified,
     });
+    if (!verified) needsHuman.push({ sessionId: item.sessionId, reason: payload?.error || payload?.note || '催促消息待确认' });
     emit({
       key: `auto_nudge:${item.sessionId}:${s.lastId || 0}`,
       at: new Date(now).toISOString(),
       type: 'auto_action',
       sessionId: item.sessionId,
       title: s.title || '',
-      detail: `已自动催一次（${payload && payload.verified ? '已入库' : '未确认'}）`,
+      detail: verified ? '催促消息已入库' : '催促消息未确认',
     });
   }
 

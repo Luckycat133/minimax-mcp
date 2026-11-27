@@ -1,88 +1,33 @@
 #!/usr/bin/env node
 'use strict';
 
-/**
- * call.js — 一次性调用某个工具，不需要常驻 MCP 客户端。
- *   node scripts/call.js minimax_status
- *   node scripts/call.js minimax_read_session '{"session":"1","limit":5}'
- *   node scripts/call.js minimax_send_message '{"message":"继续","send":true}'
- *
- *   --dry-run  把 send 强制改成 false、并打开 preview，绝不真的发送。
- *              例：node scripts/call.js minimax_send_message '{"message":"..."}' --dry-run
- */
+const { connect } = require('./stdio-client');
 
-const path = require('node:path');
-const readline = require('node:readline');
-const { spawn } = require('node:child_process');
+async function main() {
+  const argv = process.argv.slice(2);
+  const dryRun = argv.includes('--dry-run');
+  const [tool, rawArgs] = argv.filter((arg) => arg !== '--dry-run');
+  if (!tool) throw new Error('用法: node scripts/call.js <工具名> [JSON参数] [--dry-run]');
+  let args = rawArgs ? JSON.parse(rawArgs) : {};
+  if (dryRun) {
+    if (!['minimax_agent', 'minimax_send_message'].includes(tool) || (args?.action && args.action !== 'send')) {
+      throw new Error('--dry-run 仅用于原生 Agent 的 send 动作');
+    }
+    args = { ...args, action: 'send', preview: true, send: false };
+  }
 
-const SERVER = path.join(__dirname, '..', 'mcp-server.js');
-const argv = process.argv.slice(2);
-const dryRun = argv.includes('--dry-run');
-const positional = argv.filter((a) => a !== '--dry-run');
-const [tool, rawArgs] = positional;
-
-if (!tool) {
-  console.error('用法: node scripts/call.js <工具名> [JSON参数] [--dry-run]');
-  process.exit(2);
-}
-
-let args = {};
-if (rawArgs) {
-  try { args = JSON.parse(rawArgs); } catch (err) {
-    console.error(`参数不是合法 JSON: ${err.message}`);
-    process.exit(2);
+  const client = await connect({ timeoutMs: 310000 });
+  try {
+    const result = await client.call(tool, args);
+    const output = result.content.map((item) => item.text || '').join('\n');
+    if (result.isError) throw new Error(output);
+    console.log(output);
+  } finally {
+    client.close();
   }
 }
 
-if (dryRun) {
-  if (tool === 'minimax_send_message') {
-    args = { ...args, send: false, preview: true };
-  } else {
-    console.error(`--dry-run 只对 minimax_send_message 有意义（当前: ${tool}）`);
-    process.exit(2);
-  }
-  console.error('[dry-run] 已强制 send=false + preview=true，不会发送任何东西');
-}
-
-const child = spawn(process.execPath, [SERVER], { stdio: ['pipe', 'pipe', 'pipe'] });
-const rl = readline.createInterface({ input: child.stdout, terminal: false });
-let nextId = 1;
-const waiting = new Map();
-
-rl.on('line', (line) => {
-  const text = line.trim();
-  if (!text) return;
-  let msg;
-  try { msg = JSON.parse(text); } catch { return; }
-  const done = waiting.get(msg.id);
-  if (done) { waiting.delete(msg.id); done(msg); }
-});
-
-const send = (method, params) => new Promise((resolve, reject) => {
-  const id = nextId++;
-  waiting.set(id, resolve);
-  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-  setTimeout(() => { if (waiting.delete(id)) reject(new Error(`超时: ${method}`)); }, 90000);
-});
-
-(async () => {
-  await send('initialize', {
-    protocolVersion: '2024-11-05',
-    capabilities: {},
-    clientInfo: { name: 'minimax-call', version: '1' },
-  });
-  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`);
-
-  const res = await send('tools/call', { name: tool, arguments: args });
-  const result = res.result || {};
-  const text = (result.content || []).map((c) => c.text || '').join('\n');
-  if (result.isError) {
-    console.error(text);
-    process.exit(1);
-  }
-  console.log(text);
-  process.exit(0);
-})().catch((err) => {
-  console.error(`调用失败: ${err.message}`);
-  process.exit(1);
+main().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
 });

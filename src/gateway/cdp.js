@@ -13,15 +13,59 @@ const http = require('http');
 const DEFAULT_CDP_PORTS = [9223, 9222, 9224];
 const DEFAULT_TIMEOUT_MS = 5000;
 
+// Shared by the renderer operations that need to verify their target before acting.
+const CONTROL_CONTEXT = `
+  const visible = (el) => Boolean(el?.getClientRects().length && !el.closest('[aria-hidden="true"]'));
+  const taskHome = () => {
+    const home = document.querySelector('[data-testid="mavis-home-content"]');
+    return visible(home) ? home : null;
+  };
+  const activeSession = () => {
+    if (taskHome()) return null;
+    const rows = [...document.querySelectorAll('[data-shortcut-session-active="true"][data-shortcut-session-target]')];
+    const ids = new Set(rows.filter(visible).map(row => row.dataset.shortcutSessionTarget));
+    if (ids.size === 1) return ids.values().next().value;
+    return window.__MAVIS_SESSION_STORE__?.getState?.()?.activeSessionId || null;
+  };
+  const sessionRow = (id) => {
+    if (!id) return null;
+    const key = CSS.escape(id);
+    const rows = document.querySelectorAll(
+      'button[data-shortcut-session-target="' + key + '"], button[data-session-id="' + key + '"], [data-session-id="' + key + '"] button[aria-current]'
+    );
+    return [...rows].find(visible) || null;
+  };
+  const conversation = (sessionId) => {
+    const scopes = [...document.querySelectorAll('[data-testid="chat-main-conversation"]:not([data-floating-chat])')];
+    const matches = scopes.filter(scope => visible(scope) && scope.querySelector(
+      '[data-testid="message-list"][data-chat-selection-session-id="' + CSS.escape(sessionId) + '"]'
+    ));
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const scopeFor = (target) => {
+    if (target.newSession) return taskHome();
+    const id = activeSession();
+    if (target.sessionId && id !== target.sessionId) return null;
+    return id ? conversation(id) : taskHome();
+  };
+  const editorIn = (scope) => scope?.querySelector('[data-testid="message-textarea"]');
+  const normalize = (value) => String(value ?? '').replace(/\\r\\n?/g, '\\n').trim();
+  const editorText = (editor) => normalize(editor.value ?? editor.innerText);
+`;
+
 class MiniMaxCDPDriver {
   constructor(options = {}) {
     this.port = options.port || Number(process.env.MINIMAX_CDP_PORT) || 9223;
     this.ports = options.ports || DEFAULT_CDP_PORTS;
-    this.targetUrlMatch = options.targetUrlMatch || 'archon';
+    this.matchesTarget = options.matchesTarget || ((target) =>
+      target.type === 'page' && /\/archon\/?(?:[?#]|$)/.test(target.url));
+    this.targetName = options.targetName || 'MiniMax Code';
     this._ws = null;
+    this._connecting = null;
     this._reqId = 1;
     this._targetInfo = null;
     this._idleTimer = null;
+    this._pendingRequests = 0;
   }
 
   /**
@@ -33,6 +77,7 @@ class MiniMaxCDPDriver {
       clearTimeout(this._idleTimer);
       this._idleTimer = null;
     }
+    if (this._pendingRequests > 0) return;
     this._idleTimer = setTimeout(() => {
       this.close();
     }, 3500);
@@ -78,14 +123,15 @@ class MiniMaxCDPDriver {
       const probe = await this.probePort(port);
       if (!probe.ok) continue;
 
-      const target = probe.list.find(t => t.url && t.url.includes(this.targetUrlMatch));
-      if (target) {
+      const targets = probe.list.filter((target) => target.url && this.matchesTarget(target));
+      if (targets.length) {
         this.port = port;
+        const target = targets.find((candidate) => candidate.id === this._targetInfo?.id) || targets[0];
         this._targetInfo = target;
         return { ok: true, port, target };
       }
     }
-    return { ok: false, error: 'MiniMax Code archon window target not found' };
+    return { ok: false, error: `${this.targetName} renderer not found` };
   }
 
   /**
@@ -100,20 +146,23 @@ class MiniMaxCDPDriver {
    * Connect to the discovered WebSocket debugger.
    */
   async connect() {
+    if (!this._connecting) {
+      this._connecting = this._connect().finally(() => { this._connecting = null; });
+    }
+    return this._connecting;
+  }
+
+  async _connect() {
+    if (this._ws?.readyState === WebSocket.OPEN) return this._ws;
+
     const discovery = await this.discover();
-    if (!discovery.ok) {
-      throw new Error(`CDP discovery failed: ${discovery.error}`);
-    }
-
-    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
-      return this._ws;
-    }
-
+    if (!discovery.ok) throw new Error(`CDP discovery failed: ${discovery.error}`);
     const wsUrl = discovery.target.webSocketDebuggerUrl;
     if (!wsUrl) {
       throw new Error('No webSocketDebuggerUrl found on target');
     }
 
+    this.close();
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(wsUrl);
       const timer = setTimeout(() => {
@@ -127,13 +176,13 @@ class MiniMaxCDPDriver {
         resolve(ws);
       };
 
-      ws.onerror = (err) => {
+      ws.onerror = () => {
         clearTimeout(timer);
-        reject(err);
+        reject(new Error(`CDP WebSocket connection failed for ${this.targetName}`));
       };
 
       ws.onclose = () => {
-        this._ws = null;
+        if (this._ws === ws) this._ws = null;
       };
     });
   }
@@ -146,40 +195,50 @@ class MiniMaxCDPDriver {
       clearTimeout(this._idleTimer);
       this._idleTimer = null;
     }
-    const ws = await this.connect();
-    const id = this._reqId++;
-
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        ws.removeEventListener('message', onMessage);
-        this._resetIdleTimer();
-        reject(new Error(`CDP request timeout for ${method} (id=${id})`));
-      }, DEFAULT_TIMEOUT_MS);
-
-      const onMessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.id === id) {
-            clearTimeout(timer);
-            ws.removeEventListener('message', onMessage);
-            this._resetIdleTimer();
-            if (data.error) {
-              reject(new Error(`CDP error: ${JSON.stringify(data.error)}`));
-            } else {
-              resolve(data.result);
-            }
-          }
-        } catch (e) {
+    this._pendingRequests += 1;
+    try {
+      const ws = await this.connect();
+      const id = this._reqId++;
+      return await new Promise((resolve, reject) => {
+        const finish = () => {
           clearTimeout(timer);
           ws.removeEventListener('message', onMessage);
-          this._resetIdleTimer();
-          reject(e);
-        }
-      };
+          ws.removeEventListener('close', onClose);
+        };
+        const onClose = () => {
+          finish();
+          reject(new Error(`CDP connection closed during ${method}`));
+        };
+        const onMessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.id !== id) return;
+            finish();
+            if (data.error) reject(new Error(`CDP error: ${JSON.stringify(data.error)}`));
+            else resolve(data.result);
+          } catch (error) {
+            finish();
+            reject(error);
+          }
+        };
+        const timer = setTimeout(() => {
+          finish();
+          reject(new Error(`CDP request timeout for ${method} (id=${id})`));
+        }, DEFAULT_TIMEOUT_MS);
 
-      ws.addEventListener('message', onMessage);
-      ws.send(JSON.stringify({ id, method, params }));
-    });
+        ws.addEventListener('message', onMessage);
+        ws.addEventListener('close', onClose);
+        try {
+          ws.send(JSON.stringify({ id, method, params }));
+        } catch (error) {
+          finish();
+          reject(error);
+        }
+      });
+    } finally {
+      this._pendingRequests -= 1;
+      this._resetIdleTimer();
+    }
   }
 
   /**
@@ -194,66 +253,54 @@ class MiniMaxCDPDriver {
     return res && res.result ? res.result.value : null;
   }
 
-  /**
-   * Snapshot current UI status: buttons, inputs, unread dots, active task info.
-   */
-  async getUiSnapshot() {
-    const script = `
-      (() => {
-        const queryText = (selector) => {
-          const el = document.querySelector(selector);
-          return el ? el.innerText.trim() : null;
-        };
-        const editor = document.querySelector("[data-testid='message-textarea'], [contenteditable='true'], textarea, input[type='text'], input:not([type])");
-        const sendBtn = document.querySelector("[data-testid='send-button'], [data-testid*='submit']");
-        const unreadDot = document.querySelector("[data-testid='inbox-unread-dot']");
-        
-        const allButtons = Array.from(document.querySelectorAll("button, [role='button'], [data-testid*='button']"))
-          .map(b => ({
-            text: b.innerText.trim(),
-            testId: b.getAttribute("data-testid") || null,
-            disabled: b.disabled || b.getAttribute("aria-disabled") === "true"
-          }))
-          .filter(b => b.text.length > 0 && b.text.length < 50);
+  async evaluateControl(body, args = {}) {
+    return this.evaluate(`((args) => { ${CONTROL_CONTEXT} ${body} })(${JSON.stringify(args)})`);
+  }
 
-        return {
-          title: document.title,
-          hasEditor: Boolean(editor),
-          editorText: editor ? (editor.innerText || editor.value || "").trim() : "",
-          canSend: sendBtn ? (!sendBtn.disabled && sendBtn.getAttribute("aria-disabled") !== "true") : false,
-          hasUnread: Boolean(unreadDot),
-          buttons: allButtons.slice(0, 20)
-        };
-      })()
-    `;
-    return await this.evaluate(script);
+  async controlContext(sessionId = null) {
+    return this.evaluateControl(`
+      const activeSessionId = activeSession();
+      const scope = activeSessionId ? conversation(activeSessionId) : taskHome();
+      return {
+        activeSessionId,
+        targetAvailable: args.sessionId ? activeSessionId === args.sessionId || Boolean(sessionRow(args.sessionId)) : null,
+        newTaskOpen: Boolean(taskHome()),
+        composerReady: visible(editorIn(scope)),
+        windowFocused: document.hasFocus(),
+      };
+    `, { sessionId });
   }
 
   /**
    * Type message into the MiniMax TipTap/ProseMirror editor or active input field.
    */
-  async typeMessage(text, { append = false } = {}) {
-    const escaped = JSON.stringify(text);
-    const script = `
-      (() => {
-        const el = document.querySelector("[data-testid='message-textarea'], [contenteditable='true'], textarea, input[type='text'], input:not([type])");
-        if (!el) return { ok: false, error: "editor not found" };
-        el.focus();
-        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-          if (!${append}) el.value = '';
-          el.value += ${escaped};
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          return { ok: true, currentText: el.value.trim() };
-        }
-        if (!${append}) {
-          document.execCommand("selectAll", false, null);
-          document.execCommand("delete", false, null);
-        }
-        document.execCommand("insertText", false, ${escaped});
-        return { ok: true, currentText: (el.innerText || el.value || "").trim() };
-      })()
-    `;
-    return await this.evaluate(script);
+  async typeMessage(text, { append = false, ...target } = {}) {
+    return this.evaluateControl(`
+      if (!document.hasFocus()) return { ok: false, error: 'MiniMax 会话窗口没有焦点' };
+      const editor = editorIn(scopeFor(args));
+      if (!visible(editor)) return { ok: false, error: '找不到目标会话的输入框' };
+      const expected = normalize(args.append ? (editor.value ?? editor.innerText) + args.text : args.text);
+      editor.focus();
+      if (editor.matches('textarea, input')) {
+        const proto = editor.matches('textarea') ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setValue = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setValue.call(editor, args.append ? editor.value + args.text : args.text);
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+      } else if (editor.isContentEditable) {
+        const selection = document.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        if (args.append) range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        if (args.text) document.execCommand('insertText', false, args.text);
+        else if (!args.append) document.execCommand('delete', false);
+      } else {
+        return { ok: false, error: '目标输入框不可编辑' };
+      }
+      const currentText = editorText(editor);
+      return currentText === expected ? { ok: true, currentText } : { ok: false, error: '输入框内容与草稿不一致' };
+    `, { ...target, text, append });
   }
 
   /**
@@ -261,112 +308,179 @@ class MiniMaxCDPDriver {
    */
   async switchSession(sessionId) {
     if (!sessionId) throw new Error('sessionId 不能为空');
-    const escaped = JSON.stringify(sessionId);
-    const script = `
-      (() => {
-        try {
-          const store = window.__MAVIS_SESSION_STORE__;
-          if (store && store.getState && store.getState().setActiveSession) {
-            store.getState().setActiveSession(${escaped});
-            return { ok: true, active: store.getState().activeSessionId, via: 'store' };
-          }
-          // DOM fallback: find sidebar item
-          const items = Array.from(document.querySelectorAll('.mavis-sidebar-item, button, [role="button"]'));
-          const item = items.find(el => (el.getAttribute('data-session-id') === ${escaped}) || (el.innerText && el.innerText.includes(${escaped})));
-          if (item) {
-            item.click();
-            return { ok: true, via: 'dom-click' };
-          }
-          return { ok: false, error: 'session store not found' };
-        } catch (e) {
-          return { ok: false, error: e.message };
+    const select = (expand) => this.evaluateControl(`
+      if (!document.hasFocus()) return { ok: false, error: 'MiniMax 会话窗口没有焦点' };
+      if (activeSession() === args.sessionId) return { ok: true, via: 'current-session' };
+      const row = sessionRow(args.sessionId);
+      if (!row && args.expand) {
+        const toggle = document.querySelector('[data-testid="mavis-sidebar-expand"]');
+        if (visible(toggle) && !toggle.disabled) {
+          toggle.click();
+          return { expanded: true };
         }
-      })()
-    `;
-    return await this.evaluate(script);
+      }
+      if (!row || row.disabled) return { ok: false, error: '目标会话未出现在 MiniMax 侧栏。请在 MiniMax 打开该会话后重试' };
+      row.click();
+      return { ok: true, via: 'sidebar' };
+    `, { sessionId, expand });
+    const result = await select(true);
+    if (!result?.expanded) return result;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return select(false);
   }
 
   /**
    * Create and switch to a new task session.
    */
   async newTask() {
-    const script = `
-      (() => {
-        try {
-          const store = window.__MAVIS_SESSION_STORE__;
-          if (store && store.getState && store.getState().clearActiveSession) {
-            store.getState().clearActiveSession();
-          }
-          const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText && b.innerText.includes('新建任务'));
-          if (btn) {
-            btn.click();
-            return { ok: true, via: 'new-task-button' };
-          }
-          return { ok: true, via: 'clear-session' };
-        } catch (e) {
-          return { ok: false, error: e.message };
-        }
-      })()
-    `;
-    return await this.evaluate(script);
+    return this.evaluateControl(`
+      if (!document.hasFocus()) return { ok: false, error: 'MiniMax 会话窗口没有焦点' };
+      const selector = '[data-testid="mavis-new-task"], [data-testid="sidebar-shortcut-task.new"]';
+      const button = [...document.querySelectorAll(selector)].find((element) =>
+        visible(element) && !element.disabled && element.getAttribute('aria-disabled') !== 'true'
+      );
+      if (button) {
+        button.click();
+        return { ok: true, via: 'new-task-button' };
+      }
+      if (taskHome()) return { ok: true, via: 'current-home' };
+      return { ok: false, error: '找不到新建任务按钮' };
+    `);
   }
 
   /**
    * Click send button or trigger Cmd+Enter in editor.
    */
-  async sendMessage(text = null) {
-    if (text) {
-      await this.typeMessage(text);
-    }
-    const script = `
-      (() => {
-        const btn = document.querySelector("[data-testid='send-button']");
-        if (btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
-          btn.click();
-          return { ok: true, via: "send-button" };
-        }
-        // Fallback: Dispatch Enter event
-        const editor = document.querySelector("[data-testid='message-textarea']");
-        if (editor) {
-          editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", which: 13, keyCode: 13, bubbles: true }));
-          return { ok: true, via: "enter-event" };
-        }
-        return { ok: false, error: "no send trigger available" };
-      })()
-    `;
-    return await this.evaluate(script);
+  async sendMessage(text, target) {
+    return this.evaluateControl(`
+      if (!document.hasFocus()) return { ok: false, error: 'MiniMax 会话窗口没有焦点' };
+      const scope = scopeFor(args);
+      const editor = editorIn(scope);
+      if (!visible(editor) || editorText(editor) !== normalize(args.text)) {
+        return { ok: false, error: '会话或草稿已变化，已取消发送' };
+      }
+      const button = scope.querySelector('[data-testid="send-button"]');
+      if (!visible(button) || button.disabled || button.getAttribute('aria-disabled') === 'true') {
+        return { ok: false, error: '目标会话的发送按钮不可用' };
+      }
+      button.click();
+      return { ok: true };
+    `, { ...target, text });
   }
 
-  /**
-   * Click an element by testId or text content.
-   */
-  async clickElement({ testId = null, text = null, selector = null }) {
-    const escapedText = text ? JSON.stringify(text) : 'null';
-    const escapedTestId = testId ? JSON.stringify(testId) : 'null';
-    const escapedSelector = selector ? JSON.stringify(selector) : 'null';
+  async stopGeneration({ sessionId, turnId }) {
+    return this.evaluate(`(async ({ sessionId, turnId }) => {
+      if (!document.hasFocus()) return { ok: false, error: 'MiniMax 会话窗口没有焦点' };
+      if (location.protocol !== 'app:' || location.hostname !== '.') {
+        return { ok: false, error: '当前 MiniMax 版本的窗口没有可验证的停止接口' };
+      }
+      const response = await fetch('/minimax-desktop/api/v1/session/' + encodeURIComponent(sessionId) + '/abort', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turn_id: turnId, reason: 'user_stop' }),
+        signal: AbortSignal.timeout(3500), redirect: 'error',
+      });
+      return { ok: response.ok, status: response.status };
+    })(${JSON.stringify({ sessionId, turnId })})`);
+  }
 
-    const script = `
-      (() => {
-        let el = null;
-        if (${escapedTestId}) {
-          el = document.querySelector("[data-testid=" + ${escapedTestId} + "]");
+  async openMiniApp(pluginId, sessionId) {
+    return this.evaluate(`(async (args) => {
+      ${CONTROL_CONTEXT}
+      if (!document.hasFocus()) return { success: false, code: 'window_not_focused' };
+      const id = activeSession();
+      if (!id || (args.sessionId && args.sessionId !== id)) return { success: false, code: 'session_not_active' };
+      if (typeof window.miniAppAPI?.open !== 'function') return { success: false, code: 'unsupported' };
+      return await window.miniAppAPI.open({ sessionId: id, pluginId: args.pluginId });
+    })(${JSON.stringify({ pluginId, sessionId })})`);
+  }
+
+  async answerQuestion(requestId, steps) {
+    return this.evaluate(`(async (requestId, steps) => {
+      const byTestId = (scope, id) => scope.querySelector('[data-testid="' + CSS.escape(id) + '"]');
+      const card = () => document.querySelector('[data-testid="questionnaire-composer"][data-request-id="' + CSS.escape(requestId) + '"]');
+      const usable = (el) => Boolean(el?.getClientRects().length && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+      const pressed = (el) => el?.getAttribute('aria-checked') === 'true';
+      const pause = () => new Promise(resolve => setTimeout(resolve, 45));
+      const fail = (error) => ({ ok: false, error });
+      if (!usable(card()) || !document.hasFocus()) return fail('请在 MiniMax 中打开目标问卷卡片后重试');
+      const expectedStep = (root, step) => {
+        if (step.options.length) return step.options.every((item) => byTestId(root, 'questionnaire-option-' + step.stepId + '-' + item.optionId));
+        return Boolean(byTestId(root, 'questionnaire-others-toggle-' + step.stepId));
+      };
+
+      // Return to the first step so every submitted choice belongs to this request.
+      for (let index = 1; index < steps.length; index += 1) {
+        const root = card();
+        if (!usable(root) || !document.hasFocus()) return fail('目标卡片已切换或 MiniMax 失去焦点');
+        const previous = byTestId(root, 'questionnaire-progress-prev');
+        if (!usable(previous)) break;
+        previous.click();
+        await pause();
+      }
+
+      for (const [index, step] of steps.entries()) {
+        const root = card();
+        if (!usable(root) || !document.hasFocus()) return fail('目标卡片已切换或 MiniMax 失去焦点');
+        if (!expectedStep(root, step)) return fail('当前步骤与问卷记录不匹配');
+        const answer = step.answer;
+        if (!answer) {
+          const skip = byTestId(root, 'questionnaire-skip');
+          if (!usable(skip)) return fail('当前问卷步骤无法跳过');
+          skip.click();
+          if (index === steps.length - 1) return { ok: true };
+          await pause();
+          continue;
         }
-        if (!el && ${escapedSelector}) {
-          el = document.querySelector(${escapedSelector});
+
+        const option = (id) => byTestId(root, 'questionnaire-option-' + step.stepId + '-' + id);
+        const other = byTestId(root, 'questionnaire-others-toggle-' + step.stepId);
+        const selected = new Set(answer.optionIds);
+        const relevant = step.options.map((item) => ({ id: item.optionId, button: option(item.optionId) }));
+        if (relevant.some(({ button }) => !usable(button))) return fail('当前步骤的选项与问卷记录不匹配');
+        if (step.selectionMode === 'single' && !answer.selectedOther) {
+          const button = option(answer.optionIds[0]);
+          if (!usable(button)) return fail('目标单选项不可用');
+          button.click();
+          if (index === steps.length - 1) return { ok: true };
+          await pause();
+          continue;
         }
-        if (!el && ${escapedText}) {
-          const targets = Array.from(document.querySelectorAll("button, a, span, div, [role='button']"));
-          el = targets.find(e => e.innerText && e.innerText.trim() === ${escapedText});
-          if (!el) {
-            el = targets.find(e => e.innerText && e.innerText.includes(${escapedText}));
-          }
+
+        for (const { id, button } of relevant) {
+          if (pressed(button) === selected.has(id)) continue;
+          button.click();
+          await pause();
         }
-        if (!el) return { ok: false, error: "element not found" };
-        el.click();
-        return { ok: true, clickedTag: el.tagName, text: el.innerText ? el.innerText.trim().slice(0, 30) : "" };
-      })()
-    `;
-    return await this.evaluate(script);
+        if (pressed(other) !== answer.selectedOther) {
+          if (!usable(other)) return fail('目标步骤的其他选项不可用');
+          other.click();
+          await pause();
+        }
+        if (answer.selectedOther) {
+          const editor = byTestId(root, 'questionnaire-others-input-' + step.stepId);
+          if (!usable(editor) || !editor.isContentEditable) return fail('找不到问卷文本输入框');
+          editor.focus();
+          const selection = document.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(editor);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          document.execCommand('insertText', false, answer.otherText);
+          if (editor.innerText.trim() !== answer.otherText.trim()) return fail('问卷文本写入未确认');
+          await pause();
+        }
+        if (relevant.some(({ id, button }) => pressed(button) !== selected.has(id)) || pressed(other) !== answer.selectedOther) {
+          return fail('当前步骤的选项未确认');
+        }
+        const last = index === steps.length - 1;
+        const next = byTestId(root, last ? 'questionnaire-submit' : 'questionnaire-next');
+        if (!usable(next) || !document.hasFocus()) return fail('问卷提交或下一步按钮不可用');
+        next.click();
+        if (last) return { ok: true };
+        await pause();
+      }
+      return fail('未找到提交步骤');
+    })(${JSON.stringify(requestId)}, ${JSON.stringify(steps)})`);
   }
 
   /**
@@ -386,39 +500,6 @@ class MiniMaxCDPDriver {
   }
 
   /**
-   * Find text in DOM elements and return their bounding rects and selectors.
-   */
-  async findText(text) {
-    const escaped = JSON.stringify(text);
-    const script = `
-      (() => {
-        const query = ${escaped}.toLowerCase();
-        const matches = [];
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let node;
-        while ((node = walker.nextNode())) {
-          if (node.children.length === 0 && node.innerText && node.innerText.trim()) {
-            const t = node.innerText.trim();
-            if (t.toLowerCase().includes(query)) {
-              const rect = node.getBoundingClientRect();
-              matches.push({
-                text: t,
-                testId: node.getAttribute("data-testid") || null,
-                tagName: node.tagName,
-                cx: Math.round(rect.left + rect.width / 2),
-                cy: Math.round(rect.top + rect.height / 2),
-                rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
-              });
-            }
-          }
-        }
-        return matches;
-      })()
-    `;
-    return await this.evaluate(script);
-  }
-
-  /**
    * 将 MiniMax 窗口带到前台 (零权限 CDP 原生实现)
    */
   async bringToFront() {
@@ -429,59 +510,6 @@ class MiniMaxCDPDriver {
     } catch (e) {
       return { ok: false, error: e.message };
     }
-  }
-
-  /**
-   * 向 Chromium 渲染管道派发原生键盘事件 (零系统权限、亚 10ms 响应)
-   */
-  async dispatchKey(key, modifiers = []) {
-    let mod = 0;
-    if (modifiers.includes('alt')) mod |= 1;
-    if (modifiers.includes('ctrl')) mod |= 2;
-    if (modifiers.includes('cmd') || modifiers.includes('meta')) mod |= 4;
-    if (modifiers.includes('shift')) mod |= 8;
-
-    const lower = String(key).toLowerCase();
-    const vkey = lower === 'escape' ? 27 : (lower === 'return' || lower === 'enter' ? 13 : (lower === 'tab' ? 9 : 0));
-    const code = lower.length === 1 ? `Key${lower.toUpperCase()}` : (lower === 'escape' ? 'Escape' : (lower === 'return' ? 'Enter' : lower));
-
-    await this.send('Input.dispatchKeyEvent', {
-      type: 'rawKeyDown',
-      key: key,
-      code,
-      windowsVirtualKeyCode: vkey,
-      modifiers: mod,
-    });
-    await this.send('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: key,
-      code,
-      windowsVirtualKeyCode: vkey,
-      modifiers: mod,
-    });
-    return { ok: true, key, modifiers, via: 'cdp' };
-  }
-
-  /**
-   * 向 Chromium 渲染管道派发原生鼠标点击事件 (零系统权限、亚 10ms 响应)
-   */
-  async dispatchClick(x, y, button = 'left') {
-    const btn = button === 'right' ? 'right' : 'left';
-    await this.send('Input.dispatchMouseEvent', {
-      type: 'mousePressed',
-      x: Math.round(x),
-      y: Math.round(y),
-      button: btn,
-      clickCount: 1,
-    });
-    await this.send('Input.dispatchMouseEvent', {
-      type: 'mouseReleased',
-      x: Math.round(x),
-      y: Math.round(y),
-      button: btn,
-      clickCount: 1,
-    });
-    return { ok: true, clicked: [Math.round(x), Math.round(y)], button, via: 'cdp' };
   }
 
   /**
@@ -520,7 +548,19 @@ class MiniMaxCDPDriver {
         const resetAtStr = mReset ? mReset[1] : null;
         if (!resetAtMs && resetAtStr) {
           try {
-            if (/^\\d{1,2}:\\d{2}$/.test(resetAtStr)) {
+            const mCnDate = resetAtStr.match(/^(\\d{1,2})月(\\d{1,2})日\\s*(\\d{1,2}):(\\d{2})$/);
+            if (mCnDate) {
+              const now = new Date();
+              const mo = Number(mCnDate[1]);
+              const da = Number(mCnDate[2]);
+              const h = Number(mCnDate[3]);
+              const m = Number(mCnDate[4]);
+              const target = new Date(now.getFullYear(), mo - 1, da, h, m, 0, 0);
+              if (target.getTime() < now.getTime() - 86400000) {
+                target.setFullYear(target.getFullYear() + 1); // 跨年重置
+              }
+              resetAtMs = target.getTime();
+            } else if (/^\\d{1,2}:\\d{2}$/.test(resetAtStr)) {
               const now = new Date();
               const [h, m] = resetAtStr.split(':').map(Number);
               const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
@@ -535,8 +575,8 @@ class MiniMaxCDPDriver {
           } catch {}
         }
 
-        // 关键修复：精确区分"已达到上限"(硬阻断)与"即将达到上限"(软提醒)
-        const isHardLimited = Boolean(resetBtn) || (text.includes('已达到') && text.includes('上限'));
+        // 关键修复：精确区分"已达/已达到上限"(硬阻断)与"即将达到上限"(软提醒)
+        const isHardLimited = Boolean(resetBtn) || /已达到?[^。\\n]{0,12}上限/.test(text) || /usage limit reached/i.test(text);
         const waitSeconds = resetAtMs ? Math.max(0, Math.ceil((resetAtMs - Date.now()) / 1000)) : null;
 
         return {
@@ -550,26 +590,6 @@ class MiniMaxCDPDriver {
           canUpgrade: Boolean(upgradeBtn),
           bannerSummary: text.replace(/\\s+/g, " ").slice(0, 100)
         };
-      })()
-    `;
-    return await this.evaluate(script);
-  }
-
-  /**
-   * Use reset card to restore quota immediately.
-   * STRICT SAFETY GATE: Requires explicit user confirmation (confirmed: true).
-   */
-  async useResetCard({ confirmed = false } = {}) {
-    if (!confirmed) {
-      throw new Error('使用重置卡属于高风险资产消耗操作：强制要求人机交互确认。请先询问用户获得明确同意后，传 confirmed: true 才能执行。');
-    }
-    const script = `
-      (() => {
-        const btn = document.querySelector(".reset-card-use-button");
-        if (!btn) return { ok: false, error: "当前界面没有可用的重置卡按钮" };
-        if (btn.disabled) return { ok: false, error: "重置卡按钮处于禁用状态" };
-        btn.click();
-        return { ok: true, action: "reset_card_used" };
       })()
     `;
     return await this.evaluate(script);

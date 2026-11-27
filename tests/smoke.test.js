@@ -1,288 +1,162 @@
 'use strict';
 
-/**
- * smoke.test.js — 起一次真实的 stdio MCP 会话，走 initialize → tools/list → 只读调用。
- * 不做任何点击、不发送消息，所以在用户正在用 MiniMax 时也能安全跑。
- */
+const assert = require('node:assert/strict');
+const { connect } = require('../scripts/stdio-client');
+const contracts = require('../skills/minimax-mcp/references/mcp-tool-contracts.json');
+const examples = require('../skills/minimax-mcp/references/mcp-call-examples.json');
+const manifest = require('../glama.json');
 
-const { spawn } = require('node:child_process');
-const path = require('node:path');
-const readline = require('node:readline');
-
-const SERVER = path.join(__dirname, '..', 'mcp-server.js');
-
-function main() {
-  const child = spawn(process.execPath, [SERVER], { stdio: ['pipe', 'pipe', 'pipe'] });
-  const rl = readline.createInterface({ input: child.stdout, terminal: false });
-  const pending = new Map();
-  let nextId = 1;
-
-  rl.on('line', (line) => {
-    const text = line.trim();
-    if (!text) return;
-    let msg;
-    try { msg = JSON.parse(text); } catch { return; }
-    const resolve = pending.get(msg.id);
-    if (resolve) {
-      pending.delete(msg.id);
-      resolve(msg);
-    }
-  });
-
-  const send = (method, params) => new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, resolve);
-    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-    setTimeout(() => {
-      if (pending.has(id)) { pending.delete(id); reject(new Error(`超时: ${method}`)); }
-    }, 60000);
-  });
-
-  const notify = (method, params) => {
-    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
-  };
-
-  const results = [];
-  const record = (label, pass, detail) => {
-    results.push({ label, pass, detail });
-    console.log(`${pass ? '[OK]  ' : '[FAIL]'} ${label}${detail ? ` — ${detail}` : ''}`);
-  };
-
-  (async () => {
-    const init = await send('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'smoke', version: '1' },
+async function main() {
+  const client = await connect({ clientName: 'minimax-live-smoke', timeoutMs: 25000 });
+  let passed = 0;
+  let cdpOnline = false;
+  async function call(name, args, errorPattern = null) {
+    const result = await client.call(name, args);
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(result.isError, Boolean(errorPattern), payload.error);
+    if (errorPattern) assert.match(payload.error, errorPattern);
+    return payload;
+  }
+  function check(label, fn) {
+    return Promise.resolve().then(fn).then(() => {
+      passed += 1;
+      console.log('[OK] ' + label);
     });
-    record('initialize', Boolean(init.result?.serverInfo?.name), init.result?.serverInfo?.name);
-    notify('notifications/initialized', {});
+  }
 
-    const list = await send('tools/list', {});
-    const tools = list.result?.tools || [];
-    record('tools/list', tools.length === 5, `${tools.length} 个核心领域工具`);
-
-    // 逐个调所有只读工具与层级入口。用真实参数，确保不只是"能返回错误"。
-    const readOnlyCalls = [
-      ['minimax_status', {}],
-      ['minimax_session', { action: 'list', limit: 3 }],
-      ['minimax_session', { action: 'tail', count: 2, perSession: 1 }],
-      ['minimax_session', { action: 'search', query: 'minimax', limit: 2 }],
-      ['minimax_questionnaire', { action: 'list' }],
-      ['minimax_desktop', { action: 'windows' }],
-      ['minimax_bot', { action: 'roster' }],
-      ['minimax_agent', { action: 'result', timeoutSeconds: 2 }],
-      ['minimax_tasks', { limit: 3 }],
-      // 兼容别名也要继续能调通
-      ['minimax_list_sessions', { limit: 3 }],
-      ['minimax_pending', {}],
-      ['minimax_tail_sessions', { count: 2, perSession: 1 }],
-      ['minimax_search', { query: 'minimax', limit: 2 }],
-      ['minimax_windows', {}],
-      ['minimax_get_result', { timeoutSeconds: 2 }],
-    ];
-    for (const [name, args] of readOnlyCalls) {
-      const r = await send('tools/call', { name, arguments: args });
-      const isErr = r.result?.isError === true;
-      let detail = 'ok';
-      if (isErr) {
-        detail = r.result?.content?.[0]?.text?.slice(0, 120) || 'error';
-      } else {
-        try {
-          const parsed = JSON.parse(r.result.content[0].text);
-          detail = parsed.dbPath || `${Object.keys(parsed).slice(0, 3).join('/')}`;
-        } catch { detail = 'ok'; }
+  try {
+    const catalog = await client.request('tools/list');
+    const tools = new Map(catalog.tools.map((tool) => [tool.name, tool]));
+    await check('initialize → tools/list 与文档契约一致', () => {
+      assert.equal(client.init.protocolVersion, '2025-06-18');
+      assert.equal(tools.size, manifest.tools);
+      assert.deepEqual([...tools.keys()], contracts.tools.map((tool) => tool.name));
+      for (const { name, input } of contracts.tools) {
+        const tool = tools.get(name);
+        assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), Object.keys(input).sort(), name);
       }
-      record(`tools/call ${name}`, !isErr, detail);
-    }
-
-    // read_session 用序号和用 ID 两条路都要通
-    const byIndex = await send('tools/call', { name: 'minimax_read_session', arguments: { session: '1', limit: 1 } });
-    record('read_session 按序号', byIndex.result?.isError !== true);
-    const listRes = await send('tools/call', { name: 'minimax_list_sessions', arguments: { limit: 1 } });
-    let firstId = null;
-    try { firstId = JSON.parse(listRes.result.content[0].text).sessions[0].sessionId; } catch { /* 忽略 */ }
-    if (firstId) {
-      const byId = await send('tools/call', { name: 'minimax_read_session', arguments: { session: firstId, limit: 1 } });
-      record('read_session 按 ID', byId.result?.isError !== true);
-    }
-
-    // draft_answer：没有 pending 时对任意 requestId 调用必须给出可读的错误，不能崩
-    const draft = await send('tools/call', { name: 'minimax_draft_answer', arguments: { requestId: 'ask_nonexistent' } });
-    record('draft_answer 对不存在的 ID 报错', draft.result?.isError === true);
-
-    const bad = await send('tools/call', { name: 'minimax_nope', arguments: {} });
-    record('未知工具被拒绝', Boolean(bad.error), bad.error?.message);
-
-    // 回归：窗口/焦点窗口必须只属于 MiniMax，不能把宿主或别的 App 的窗口混进来。
-    // 曾经在这里栽过——按"当前活跃应用"取焦点窗口，结果拿到的是 MCP 宿主自己的窗口。
-    const wins = await send('tools/call', { name: 'minimax_windows', arguments: {} });
-    let winOk = wins.result?.isError !== true;
-    let detail = '';
-    if (winOk) {
-      const parsed = JSON.parse(wins.result.content[0].text);
-      const foreign = (parsed.windows || []).filter((w) => w.app !== 'MiniMax Code');
-      winOk = foreign.length === 0;
-      detail = foreign.length ? `混进了 ${foreign.map((f) => f.app).join(',')}` : `${parsed.onScreenCount} 个在屏窗口`;
-    } else {
-      detail = '工具报错';
-    }
-    record('窗口列表只含 MiniMax', winOk, detail);
-
-    // 回归：preview 是只读的，任何情况下都必须放行；且必须报告守卫状态。
-    const pv = await send('tools/call', {
-      name: 'minimax_send_message',
-      arguments: { message: 'x', preview: true },
+      for (const req of examples.examples.flatMap((example) => example.calls)) {
+        const tool = tools.get(req.params.name);
+        assert.ok(tool, req.params.name);
+        for (const key of Object.keys(req.params.arguments)) assert.ok(Object.hasOwn(tool.inputSchema.properties, key), key);
+        if (req.params.arguments.action) assert.ok(tool.inputSchema.properties.action.enum.includes(req.params.arguments.action));
+      }
     });
-    let pvOk = pv.result?.isError !== true;
-    let pvDetail = '';
-    if (pvOk) {
-      const parsed = JSON.parse(pv.result.content[0].text);
-      pvOk = parsed.preview === true
-        && typeof parsed.guard === 'object'
-        && typeof parsed.inputAt === 'object'
-        && Array.isArray(parsed.busySessions);
-      pvDetail = `guard.busy=${parsed.guard?.busy}, busySessions=${parsed.busySessions?.length}`;
-    } else {
-      pvDetail = pv.result?.content?.[0]?.text?.slice(0, 100) || 'error';
-    }
-    record('preview 只读且放行', pvOk, pvDetail);
-
-    // 回归：守卫必须能拦住发送。
-    // 用 quietSeconds 设成极大值 + send:false —— 既保证一定触发守卫，
-    // 又保证即使守卫失效也绝不会真的发出任何东西（不会污染用户的会话）。
-    const guarded = await send('tools/call', {
-      name: 'minimax_send_message',
-      arguments: { message: '联调守卫测试', send: false, quietSeconds: 999999 },
+    await check('状态、额度和待办摘要可读', async () => {
+      const status = await call('minimax_status');
+      assert.equal(status.dbFound, true);
+      assert.equal(typeof status.app.running, 'boolean');
+      assert.equal(typeof status.cdp.online, 'boolean');
+      cdpOnline = status.cdp.online;
+      assert.equal(typeof status.attention.pendingQuestions, 'number');
+      if (status.cdp.online) assert.equal(typeof status.quota?.isLimited, 'boolean');
+      assert.equal((await call('minimax_status', { includeBrief: false })).attention, undefined);
     });
-    const gErr = guarded.result?.isError === true;
-    const gText = guarded.result?.content?.[0]?.text || '';
-    record('活跃守卫拦住发送', gErr && /已拒绝发送/.test(gText), gErr ? gText.slice(0, 110) : '竟然放行了');
-
-    // 回归：get_result 必须能在不改任何状态的情况下收回某个会话的最终回复。
-    const gr = await send('tools/call', {
-      name: 'minimax_get_result',
-      arguments: { timeoutSeconds: 3 },
+    const list = (await call('minimax_session', { limit: 3 })).sessions;
+    const sid = list.find((session) => session.messages > 2)?.sessionId || list[0]?.sessionId;
+    assert.ok(sid, '需要一个现有 MiniMax 会话验证历史');
+    await check('读取历史、翻页、按序号查询', async () => {
+      const page = await call('minimax_session', { sessionId: sid, limit: 1 });
+      assert.equal(page.sessionId, sid);
+      assert.equal(page.returned, 1);
+      if (page.hasMore) {
+        const previous = await call('minimax_session', { sessionId: sid, limit: 1, before: page.oldestId });
+        assert.equal(previous.returned, 1);
+        assert.ok(previous.oldestId < page.oldestId);
+      }
+      const last = await call('minimax_session', { sessionId: '1', limit: 1 });
+      assert.ok(last.messages.length);
+      const legacy = await call('minimax_read_session', { session: sid, limit: 1 });
+      assert.equal(legacy.sessionId, sid);
+      await call('minimax_session', { sessionId: sid, session: 'another-session', limit: 1 }, /sessionId.*session.*冲突/);
     });
-    let grOk = gr.result?.isError !== true;
-    let grDetail = '';
-    if (grOk) {
-      const parsed = JSON.parse(gr.result.content[0].text);
-      grOk = typeof parsed.sessionId === 'string' && typeof parsed.done === 'boolean';
-      grDetail = `session=${parsed.sessionId?.slice(0, 14)} done=${parsed.done}`;
-    } else {
-      grDetail = gr.result?.content?.[0]?.text?.slice(0, 100) || 'error';
-    }
-    record('get_result 可收回结果', grOk, grDetail);
-
-    // OCR：找一段绝不存在的文字，必须是 0 命中且不报错（不能瞎给一个坐标）
-    // Bot Studio：名册查询
-    const rosterRes = await send('tools/call', { name: 'minimax_bot_roster', arguments: {} });
-    let rosterOk = rosterRes.result?.isError !== true;
-    let rosterDetail = '';
-    if (rosterOk) {
-      const parsed = JSON.parse(rosterRes.result.content[0].text);
-      rosterOk = Array.isArray(parsed.groups) && Array.isArray(parsed.bots) && parsed.totalBots >= 1;
-      rosterDetail = `${parsed.totalGroups} 个群聊 / ${parsed.totalBots} 个专家 Bot`;
-    } else {
-      rosterDetail = rosterRes.result?.content?.[0]?.text?.slice(0, 90) || 'error';
-    }
-    record('bot_roster 返回完整架构与名册', rosterOk, rosterDetail);
-
-    // Bot 沟通：目标名称解析与消息读取（容灾走磁盘/直连）
-    const bmRes = await send('tools/call', {
-      name: 'minimax_bot_message',
-      arguments: { target: '剪辑师', action: 'read', limit: 5 },
+    await check('统一列表支持采样，旧 tail 仍兼容', async () => {
+      const current = await call('minimax_session', { limit: 2, perSession: 1 });
+      const legacy = await call('minimax_session', { action: 'tail', count: 2, perSession: 1 });
+      const alias = await call('minimax_tail_sessions', { count: 2, perSession: 1 });
+      for (const { sessions } of [current, legacy, alias]) {
+        assert.ok(sessions.length > 0 && sessions.length <= 2);
+        assert.ok(sessions.every((session) => session.latest.length === 1));
+      }
+      await call('minimax_session', { limit: 21, perSession: 1 }, /20/);
     });
-    let bmOk = bmRes.result?.isError !== true;
-    let bmDetail = '';
-    if (bmOk) {
-      const parsed = JSON.parse(bmRes.result.content[0].text);
-      bmOk = parsed.target && parsed.target.name === '剪辑师' && Array.isArray(parsed.messages);
-      bmDetail = `成功解析「${parsed.target?.name}」会话，返回 ${parsed.messages?.length} 条消息 (来源: ${parsed.source})`;
-    } else {
-      bmDetail = bmRes.result?.content?.[0]?.text?.slice(0, 90) || 'error';
-    }
-    record('bot_message 中文别名解析与读消息', bmOk, bmDetail);
-
-    // brief：必须是"注意力队列"形态，不是平铺列表
-    const br = await send('tools/call', { name: 'minimax_brief', arguments: { limit: 50 } });
-    let brOk = br.result?.isError !== true;
-    let brDetail = '';
-    if (brOk) {
-      const parsed = JSON.parse(br.result.content[0].text);
-      brOk = typeof parsed.headline === 'string'
-        && Array.isArray(parsed.items)
-        && Array.isArray(parsed.taskFailures)
-        && parsed.scannedSessions > 0
-        && parsed.items.every((it) => it.kind && it.why && it.next && it.priority);
-      brDetail = parsed.headline.slice(0, 70);
-    } else {
-      brDetail = br.result?.content?.[0]?.text?.slice(0, 100) || 'error';
-    }
-    record('brief 输出注意力队列', brOk, brDetail);
-
-    // 审计：动界面的工具必须留下记录，只读工具不该留
-    const audit = require(path.join(__dirname, '..', 'src/gateway/audit'));
-    const beforeCount = audit.recent(100000).length;
-    await send('tools/call', { name: 'minimax_screenshot', arguments: { name: 'audit_probe', mode: 'region', x: 0, y: 0, width: 20, height: 20 } });
-    const afterUi = audit.recent(100000).length;
-    record('动界面会写审计', afterUi > beforeCount, `${beforeCount} → ${afterUi}`);
-
-    const beforeRead = audit.recent(100000).length;
-    await send('tools/call', { name: 'minimax_status', arguments: {} });
-    const afterRead = audit.recent(100000).length;
-    record('只读不写审计', afterRead === beforeRead, `${beforeRead} → ${afterRead}`);
-
-    // watch：status 与 dryRun tick 都必须是只读的、结构完整的
-    const ws = await send('tools/call', { name: 'minimax_watch', arguments: { action: 'status' } });
-    let wsOk = ws.result?.isError !== true;
-    let wsDetail = '';
-    if (wsOk) {
-      const parsed = JSON.parse(ws.result.content[0].text);
-      wsOk = typeof parsed.trackedSessions === 'number' && typeof parsed.statePath === 'string';
-      wsDetail = `跟踪 ${parsed.trackedSessions} 个会话`;
-    } else {
-      wsDetail = ws.result?.content?.[0]?.text?.slice(0, 100) || 'error';
-    }
-    record('watch status 可读', wsOk, wsDetail);
-
-    const wt = await send('tools/call', { name: 'minimax_watch', arguments: { dryRun: true } });
-    let wtOk = wt.result?.isError !== true;
-    let wtDetail = '';
-    if (wtOk) {
-      const parsed = JSON.parse(wt.result.content[0].text);
-      wtOk = Array.isArray(parsed.events)
-        && Array.isArray(parsed.actions)
-        && Array.isArray(parsed.needsHuman)
-        && parsed.dryRun === true
-        && parsed.actions.every((a) => a.planned === true);
-      wtDetail = `事件 ${parsed.events.length} / 动作 ${parsed.actions.length} / 待处理 ${parsed.needsHuman.length}`;
-    } else {
-      wtDetail = wt.result?.content?.[0]?.text?.slice(0, 100) || 'error';
-    }
-    record('watch dryRun 不执行任何动作', wtOk, wtDetail);
-
-    const ev = await send('tools/call', { name: 'minimax_events', arguments: { limit: 5 } });
-    let evOk = ev.result?.isError !== true;
-    let evDetail = '';
-    if (evOk) {
-      const parsed = JSON.parse(ev.result.content[0].text);
-      evOk = Array.isArray(parsed.events);
-      evDetail = `${parsed.events.length} 条事件`;
-    } else {
-      evDetail = ev.result?.content?.[0]?.text?.slice(0, 100) || 'error';
-    }
-    record('events 可读', evOk, evDetail);
-
-    const failed = results.filter((r) => !r.pass).length;
-    console.log(`\n${results.length - failed}/${results.length} 通过`);
-    child.kill();
-    process.exit(failed === 0 ? 0 : 1);
-  })().catch((err) => {
-    console.error('冒烟测试异常:', err.message);
-    child.kill();
-    process.exit(1);
-  });
+    await check('搜索标题和正文，错误给出修正方式', async () => {
+      const { hits } = await call('minimax_session', { query: 'MiniMax', limit: 4 });
+      assert.ok(Array.isArray(hits) && hits.length <= 4);
+      assert.ok(hits.every((hit) => hit.sessionId && ['session', 'message'].includes(hit.kind)));
+      await call('minimax_session', { action: 'search', query: '  ' }, /搜索关键词/);
+      await call('minimax_session', { sessionId: '%', limit: 1 }, /完整 sessionId/);
+      await call('minimax_session', { limit: '5' }, /integer/);
+      await call('minimax_session', { action: null }, /action/);
+      await call('minimax_session', JSON.parse('{"__proto__":{"limit":1}}'), /不是这个工具支持/);
+    });
+    await check('查询指定轮次，拒绝未知会话', async () => {
+      const result = await call('minimax_agent', { sessionId: sid });
+      assert.equal(result.sessionId, sid);
+      assert.equal(typeof result.done, 'boolean');
+      await call('minimax_agent', { action: 'result', sessionId: 'mvs_missing_mcp_smoke' }, /找不到会话/);
+    });
+    await check('发送预览检查目标且保持当前会话', async () => {
+      const snapshot = await call('minimax_agent', { message: 'MCP smoke preview', preview: true });
+      const preview = await call('minimax_agent', { sessionId: sid, message: 'MCP smoke preview', send: true, preview: true });
+      const newTask = await call('minimax_agent', { message: 'MCP smoke preview', newSession: true, preview: true });
+      assert.equal(preview.preview, true);
+      assert.equal(preview.wouldSend, true);
+      assert.equal(preview.targetSessionId, sid);
+      assert.equal(typeof preview.guard.wouldBlock, 'boolean');
+      assert.equal(newTask.newSession, true);
+      const after = await call('minimax_agent', { message: 'MCP smoke preview', preview: true });
+      assert.equal(after.activeSessionId, snapshot.activeSessionId);
+      assert.equal(after.newTaskOpen, snapshot.newTaskOpen);
+      if (cdpOnline) {
+        assert.equal(snapshot.via, 'cdp');
+        assert.equal(typeof snapshot.windowFocused, 'boolean');
+        assert.equal(typeof snapshot.composerReady, 'boolean');
+        assert.equal(typeof snapshot.newTaskOpen, 'boolean');
+      }
+      await call('minimax_agent', { sessionId: sid, message: 'MCP smoke preview', newSession: true, preview: true }, /互斥/);
+      await call('minimax_agent', { action: 'stop', sessionId: 'mvs_missing_mcp_smoke', preview: true }, /preview|找不到会话/);
+      await call('minimax_send_message', { message: 'MCP smoke preview', at: 'bad', preview: true }, /坐标/);
+    });
+    await check('读取 Bot 名册与历史，缺少写入目标时返回错误', async () => {
+      const roster = await call('minimax_bot');
+      assert.ok(Array.isArray(roster.groups) && Array.isArray(roster.bots));
+      const bot = roster.bots[0] || roster.groups[0];
+      assert.ok(bot, '需要一个 Bot 或群聊验证历史');
+      const history = await call('minimax_bot', { target: bot.name, limit: 2 });
+      assert.equal(history.target.chatId, bot.chatId);
+      assert.ok(Array.isArray(history.messages));
+      assert.ok(['live', 'disk'].includes(history.source));
+      console.log('  Bot 历史数据源 ' + history.source + '，返回 ' + history.messages.length + ' 条');
+      await call('minimax_bot', { text: 'MCP smoke guard' }, /target/);
+      await call('minimax_bot', { target: 'bot:../../wrong' }, /无效的 Bot chatId/);
+      await call('minimax_bot', {
+        action: 'answer', target: bot.chatId, messageId: 'msg_missing',
+        answers: [{ stepId: 'step', selectedOptionIds: 'invalid' }],
+      }, /selectedOptionIds/);
+    });
+    await check('读取问卷待办与预览', async () => {
+      const { pending } = await call('minimax_questionnaire');
+      assert.ok(Array.isArray(pending));
+      if (pending[0]) {
+        const preview = await call('minimax_questionnaire', { requestId: pending[0].requestId });
+        assert.equal(preview.preview, true);
+        assert.ok(preview.suggestion);
+      } else {
+        console.log('  当前没有待答问卷，隔离用例覆盖拟答与提交');
+      }
+      await call('minimax_questionnaire', { requestId: 'ask_missing_mcp_smoke' }, /找不到提问/);
+    });
+    await check('未知工具返回 JSON-RPC 错误', async () => {
+      await assert.rejects(client.call('minimax_auto_resume'), { code: -32602 });
+    });
+    console.log(passed + ' 组真机 MCP 检查通过');
+  } finally {
+    client.close();
+  }
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

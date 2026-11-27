@@ -1,318 +1,37 @@
 # minimax-mcp — 工程约定
 
-## 架构
+## 架构边界
 
-薄 MCP 层 + 本地 gateway，两层严格分开：
+薄 MCP 层 + 本地 gateway 严格分离：`mcp-server.js` 仅转发；改工具面只动 `src/mcp/`（handler 只做参数校验、前台校验和错误转换，不写底层实现）；改数据/GUI/OCR 只动 `src/gateway/` 与 `scripts/mac_gui.py`、`scripts/ocr.swift`；配套 Skill 在 `skills/minimax-mcp/`。
 
-```
-mcp-server.js            薄入口，只转发
-src/mcp/                 协议与工具面：contract / tools / handler / stdio-server
-src/gateway/db.js        只读 SQLite（系统 sqlite3 CLI，参数转义后内联）
-src/gateway/gui.js       GUI 驱动（调 scripts/mac_gui.py）
-scripts/mac_gui.py       CoreGraphics 事件注入，纯 ctypes
-skills/minimax-mcp/      配套 Agent Skill
-```
-
-改工具面只动 `src/mcp/`；改数据来源只动 `src/gateway/`。handler 不做实现，
-只做参数校验、前台校验和错误转换。
-
-## 硬规则
-
-1. **数据库只读。** MiniMax App 运行时有内存缓存，写库会造成状态不一致。
-2. **不引第三方依赖。** SQLite 走 CLI，GUI 走 python3，传输自己写。
-3. **控制工具必须先过前台校验**，不在前台就返回错误，不允许硬点。
-4. **`minimax_send_message` 默认不发送**，`send: true` 才回车；发送后必须查库验证。
-5. **加工具要同步更新** `src/mcp/tools.js`、`references/mcp-tool-contracts.json`、
-   `glama.json` 里的 tools 计数，以及 `tests/smoke.test.js`。
-
-## 测试
+## 校验与打包命令
 
 ```sh
-npm run doctor   # 环境自检（不启动 MiniMax，不点击）
-npm test         # 真实 stdio 会话冒烟：initialize → tools/list → 只读调用
-```
-
-冒烟测试刻意只调只读工具，这样用户正在用 MiniMax 时也能安全跑。
-
-## 已知限制
-
-- 不能按按钮文字可靠点击（Electron 无 AX 树，中文 OCR 不可用）。
-- 切会话要点左侧列表，坐标随布局变。
-- 窗口被完全遮挡时后台截到旧帧。
-- MCP 工具面版本（CONTRACT_VERSION）与 MCP 协议修订号是两件事，别混。
-
-## 实测踩过的坑（都已修，别改回去）
-
-1. **判断"App 是否在前台"不能看最上层窗口**。浮动面板（NSPanel）会一直躺在最上层，
-   但它不是活跃应用。必须用 `lsappinfo front` → `lsappinfo info <ASN>` 拿活跃应用。
-2. **`CGWindowListCopyWindowInfo(OnScreenOnly)` 会漏掉隐藏/最小化/在别的 Space 的窗口**，
-   那种情况会误判成"App 没有窗口"。用 `kCGWindowListOptionAll` 兜底，并配 `open -a` 拉回来。
-3. **取焦点窗口必须按目标 App 自己的 PID 查**，不能按"当前活跃应用"查——
-   否则 MCP 宿主自己在前台时就会拿到宿主的窗口，点击直接打到宿主上去。
-4. **一个 App 可能同时开多个窗口**（主窗口 + 新建任务页）。按键和输入去的是焦点窗口
-   （AXFocusedWindow），不是面积最大的那个。算坐标前先用焦点窗口。
-5. **`sqlite3` CLI 不接受绑定参数**：SQL 后面多出来的 argv 会被当成下一条 SQL 执行。
-   必须转义后内联。
-6. **区域截图的坐标**：`screencapture -R` 用像素，我们的坐标系用点，Retina 上要乘
-   backing scale（`CGDisplayPixelsWide / CGDisplayBounds.width`）。本机实测是 1.0，
-   但换了分辨率设置就会变，代码里必须留换算。
-
-## 分发
-
-```sh
+npm run doctor       # 环境自检（不启动 MiniMax，不点击）
+npm test             # 真实 stdio 冒烟（刻意只调只读工具，用户使用 MiniMax 时可安全跑）
 npm run pack:npm     # 打 tarball 并校验内容（不发布）
 npm run pack:mcpb    # 打 .mcpb bundle 并解包验证能 require
 ```
 
-产物在 `dist/`。两个脚本互不删除对方产物。
+- 跑 `edge.test.js` 等涉及 `watch`/`audit`/`tasks` 的测试必须通过 `MINIMAX_MCP_HOME` 隔离到临时目录，否则会向真实 `~/.minimax-mcp/events.jsonl` 写假事件。
 
-## 踩过的坑（打包相关）
+## 硬规则（附原因）
 
-- 宿主对 Node 的 `fs.copyFileSync` 有文件类型白名单，`.py` 会被拒
-  （`CODEBUDDY_BROKER_DENY`）。构建脚本里拷 `.py` 必须走 shell 的 `cp`。
-- `cp -R` 不建父目录，目标父目录不存在会 ENOENT，先 `mkdir -p`。
-- `npm pack` 会把 `dist/` 一起塞进去，所以 `dist/` 必须留在 `.gitignore` 里，
-  且构建脚本要显式排除。
+1. **数据库只读**：MiniMax App 运行时有内存缓存，直接写 SQLite 会导致状态不一致。
+2. **零第三方依赖**：SQLite 走系统 `sqlite3` CLI（参数转义后内联），GUI 走 `python3` ctypes，传输层自写。
+3. **控制工具先过前台校验**：不在前台必须直接报错，禁止硬点；`minimax_send_message` 默认不发送（`send: true` 才回车），发送/答问卷后必须回库验证（`verified` 以数据库为准，不信“我点了”）。
+4. **增删工具同步清单**：同步更新 `src/mcp/tools.js`、`skills/minimax-mcp/references/mcp-tool-contracts.json`、`glama.json`（tools 计数）及 `tests/smoke.test.js`。
+5. **契约版本与协议版本分离**：`CONTRACT_VERSION`（工具面版本）与 MCP 协议修订号不要混用。
 
-## OCR 层（2026-10-31 加）
+## 高危踩坑警告（均已修，勿回退）
 
-`scripts/ocr.swift` → `.cache/ocr`，macOS Vision，`recognitionLanguages = ["zh-Hans","en-US"]`。
-`src/gateway/ocr.js` 包一层：`read(region)` / `find(query, opts)` / `pickLeftmostColumn`。
+- **前台与焦点窗口**：判断前台必须用 `lsappinfo front` → `lsappinfo info <ASN>`（浮动 `NSPanel` 永远在最上层，不能看最上层窗口）；窗口枚举用 `kCGWindowListOptionAll` + `open -a`（`OnScreenOnly` 会漏最小化/跨 Space 窗口）；取焦点窗口必须按目标 App 的 PID 查 `AXFocusedWindow`（否则 MCP 宿主在前台时会误点宿主）；主窗口宽度阈值保持 `320`（非 `800`）。
+- **SQLite 与截图坐标**：`sqlite3` CLI 不收绑定参数且占位符替换须避开单引号字面量；`screencapture -R` 按屏幕点计坐标（切勿重复乘 backing scale，换 Retina 机需复测）；`at` 坐标必须先校验非 NaN。
+- **OCR（macOS Vision）**：侧栏与顶栏会出现同名标题，必须用 `pickLeftmostColumn` 取最左列最上方；`prefix` 模式严禁兜底到 `contains`（点错按钮比找不到更危险）；Vision y 轴向上须用 `1 - bbox.maxY`；长锚点跨行由 `findByAnchor` 逐级缩短重试。
+- **问卷与打包**：`src/mcp/questionnaire.js` 同时兼容 `optionIds`/`selectedOptionIds`，未知 ID 必须显式报错不静默忽略；构建脚本拷 `.py` 必须用 shell `cp`（先 `mkdir -p`，宿主 `fs.copyFileSync` 会以 `CODEBUDDY_BROKER_DENY` 拒 `.py`）；`dist/` 保持在 `.gitignore` 且排除在 `npm pack` 外。
+- **launchd 安装**：沙箱下 `launchctl bootstrap` 可能报 `Input/output error`，安装脚本失败时必须保持旧任务原样，绝不能停旧装新失败。
 
-踩过的坑：
+## 深入参考（按需读取，1 跳指针）
 
-1. **同一个标题会出现两次**（侧栏列表 + 主区域顶栏）。直接取匹配度最高的会点到顶栏，
-   把标题变成选中态。必须取**最左那一列**再取最上面一个（`pickLeftmostColumn`）。
-   这条有单测盯着，别改回去。
-2. **`prefix` 模式不能兜底到 `contains`**。第一版把 `t.includes(q)` 写在 mode 判断外面，
-   导致 prefix 模式照样匹配中间片段。匹配规则错了会点错按钮，比找不到更危险。
-3. **长锚点跨行必挂**。选项文案常换行渲染，OCR 会切成两条观测。`findByAnchor` 会按
-   18 → 12 → 8 → 5 逐级缩短重试。
-4. **Vision 的 y 轴向上**，屏幕坐标 y 向下，换算要用 `1 - bbox.maxY`。
-5. **Vision 不认纯图标**。没有文字的按钮只能退回截图 + 手算坐标。
-
-## 问卷答案校验（src/mcp/questionnaire.js）
-
-- `optionIds` 和 `selectedOptionIds` 两种写法都收（历史数据用后者）。
-- 未知 stepId / optionId 一律报错并点名可选值，**不静默忽略**——静默忽略的表现是
-  "点了半天什么都没选中"，极难排查。
-- 单选题给多个选项会砍成一个并报错。
-- 提交后用 `questionnaire_requests.status` 是否离开 `pending` 做真验证，不信"我点了"。
-
-## 设计取舍（不是照搬任何现成东西，想改先看这里）
-
-### 1. brief 只输出"要处理的"，不平铺
-一开始的 `status` / `list_sessions` 是给程序看的，不是给人看的——137 个会话倒出来，
-读的人还得自己判断哪个重要。`brief` 把判断做在服务端：
-**等你决定 → 报错 → 卡住 → 在跑 → 刚完成**，安静的旧会话直接不输出。
-
-每条的 `why` 是"为什么值得看"，`next` 是"下一步调什么"。没有 `why` 的条目等于噪音。
-
-判据来自实测：
-- 会话 `status='error'` 带 `error_message`，这是真实失败（比如 Token 上限），必须报；
-- `status='started'` 只表示"这轮没结束"，不等于在生成——有 pending 提问时也是 started，
-  所以"等你决定"要排在它前面，否则会把它误报成"在跑"；
-- 后台任务失败**不改变会话状态**，光看会话列表必然漏掉，所以单独列 `taskFailures`。
-
-### 2. 三档风险分级，不是二档
-MCP 只有 `readOnlyHint` / `destructiveHint` 两个布尔，但"点一下界面"和"替你回句话"
-完全不同。内部用 read / ui / commit 三档，对外压成协议字段。
-`stop_generation` 归 ui 是刻意的：它是安全阀，加确认等于给刹车加锁。
-
-### 3. 审计是必需品，不是附加项
-GUI 操作没有 undo。`~/.minimax-mcp/audit.jsonl` 记 tool / level / 脱敏参数 / 耗时 / 目标坐标。
-审计失败绝不能影响主流程，所以 `record()` 全程 try-catch 吞异常。
-
-### 4. 提交后一律回数据库核对，不信"我点了"
-`send_message` 查 `local_runtime_message_rows`，`answer_question` 查
-`questionnaire_requests.status`。返回里的 `verified` 是数据库事实。
-
-## 设计取舍（不是照搬任何现成东西，想改先看这里）
-
-### 1. brief 只输出"要处理的"，不平铺
-一开始的 `status` / `list_sessions` 是给程序看的，不是给人看的——137 个会话倒出来，
-读的人还得自己判断哪个重要。`brief` 把判断做在服务端：
-**等你决定 → 报错 → 卡住 → 在跑 → 刚完成**，安静的旧会话直接不输出。
-
-每条的 `why` 是"为什么值得看"，`next` 是"下一步调什么"。没有 `why` 的条目等于噪音。
-
-判据来自实测：
-- 会话 `status='error'` 带 `error_message`，这是真实失败（比如 Token 上限），必须报；
-- `status='started'` 只表示"这轮没结束"，不等于在生成——有 pending 提问时也是 started，
-  所以"等你决定"要排在它前面，否则会把它误报成"在跑"；
-- 后台任务失败**不改变会话状态**，光看会话列表必然漏掉，所以单独列 `taskFailures`。
-
-### 2. 三档风险分级，不是二档
-MCP 只有 `readOnlyHint` / `destructiveHint` 两个布尔，但"点一下界面"和"替你回句话"
-完全不同。内部用 read / ui / commit 三档，对外压成协议字段。
-`stop_generation` 归 ui 是刻意的：它是安全阀，加确认等于给刹车加锁。
-
-### 3. 审计是必需品，不是附加项
-GUI 操作没有 undo。`~/.minimax-mcp/audit.jsonl` 记 tool / level / 脱敏参数 / 耗时 / 目标坐标。
-审计失败绝不能影响主流程，所以 `record()` 全程 try-catch 吞异常。
-
-### 4. 提交后一律回数据库核对，不信"我点了"
-`send_message` 查 `local_runtime_message_rows`，`answer_question` 查
-`questionnaire_requests.status`。返回里的 `verified` 是数据库事实。
-
-## 主动巡检的设计（2026-10-31 加）
-
-### 为什么是"快照 diff"而不是事件订阅
-MiniMax 没有对外事件接口，能读的只有 SQLite。所以只能在服务端做 diff，把状态变化还原成事件。
-代价是精度取决于轮询间隔，好处是零侵入、不改对方任何东西。
-
-### 事件与动作必须分开记
-`events` 是事实（发生了什么），`actions` 是我做的（带策略判定理由）。
-混在一起就没法回答"这是它自己变的，还是我动过"。
-
-### 自动动作的四道闸
-风险 ≤ low、有推荐答案、人离开 ≥180s、每轮 ≤2 个。少一道都会出事：
-- 少"人离开" → 抢焦点，人在打字时被抢走鼠标；
-- 少"有推荐答案" → 替人从两个等价选项里瞎挑一个；
-- 少"每轮限额" → 一次回答十个问题，界面点乱；
-- 少"风险等级" → 替你买了套餐、发布了版本。
-
-### 人在场时是 ask_human，不是 skip
-`skip` 表示"这件事不用管"，`ask_human` 表示"该人管但我没动"。人在机器前时是后者——
-**不执行不等于吞掉**。这个区分搞错，就会出现"我明明在电脑前，却没看到那个提问"。
-
-### launchd 在沙箱里装不上
-`launchctl bootstrap` 在受限环境返回 `Input/output error`（用户域不可写），
-连最小 plist 也一样。所以安装脚本必须做到：**装失败时保持旧任务原样**，
-绝不能出现"新的没装上、旧的被我停了"。这条是实测踩出来的。
-
-## 主动巡检的设计（2026-10-31 加）
-
-### 为什么是"快照 diff"而不是事件订阅
-MiniMax 没有对外事件接口，能读的只有 SQLite。所以只能在服务端做 diff，把状态变化还原成事件。
-代价是精度取决于轮询间隔，好处是零侵入、不改对方任何东西。
-
-### 事件与动作必须分开记
-`events` 是事实（发生了什么），`actions` 是我做的（带策略判定理由）。
-混在一起就没法回答"这是它自己变的，还是我动过"。
-
-### 自动动作的四道闸
-风险 ≤ low、有推荐答案、人离开 ≥180s、每轮 ≤2 个。少一道都会出事：
-- 少"人离开" → 抢焦点，人在打字时被抢走鼠标；
-- 少"有推荐答案" → 替人从两个等价选项里瞎挑一个；
-- 少"每轮限额" → 一次回答十个问题，界面点乱；
-- 少"风险等级" → 替你买了套餐、发布了版本。
-
-### 人在场时是 ask_human，不是 skip
-`skip` 表示"这件事不用管"，`ask_human` 表示"该人管但我没动"。人在机器前时是后者——
-**不执行不等于吞掉**。这个区分搞错，就会出现"我明明在电脑前，却没看到那个提问"。
-
-### launchd 在沙箱里装不上
-`launchctl bootstrap` 在受限环境返回 `Input/output error`（用户域不可写），
-连最小 plist 也一样。所以安装脚本必须做到：**装失败时保持旧任务原样**，
-绝不能出现"新的没装上、旧的被我停了"。这条是实测踩出来的。
-
-## 2026-10-31 自查抓出的 8 个问题（都修了，别再改回去）
-
-1. **`get_result` 传了不存在的 sessionId 会静默换成"最近活跃会话"**。
-   调用方拿到别人的结果还以为是自己要的——比报错危险得多。现在显式传就必须能解析，否则报错。
-2. **`stdio-server.js` 里有两个 `emit`**。后定义的那个把通知塞进数组、只在收到客户端消息时才冲刷，
-   而客户端订阅完就是等——通知永远发不出去。函数声明会提升，后一个覆盖前一个，肉眼极难发现。
-   现在只保留一个，直接写 stdout。
-3. **任务轮询器调 `waitForResult(…, 1, 0)`**：timeout=1 秒、间隔 0ms，等于每个任务空转烧 1 秒 CPU，
-   50 个任务就是 50 秒满载。拆出 `checkResult()` 做单次检查。
-4. **`db.status()` 用 `status='running'` 统计在跑任务**，而表里只有终态值，永远是 0。
-   改成 `ended_at_ms is null`。
-5. **SQL 占位符用 `sql.replace(/\?/g)`**，字符串字面量里的问号也会被替换，参数错位。
-   改成扫描单引号内外。
-6. **主窗口宽度阈值硬编码 800**（在 5K 屏量的）。用户把窗口拖到 700 宽，所有控制类工具报"找不到窗口"。
-   改成 320，并优先用焦点窗口。
-7. **截图区域乘了 backing scale**。`screencapture -R` 吃的是屏幕点，乘了会截到偏移且放大两倍的区域。
-   **注意：本机 scale=1，这条无法在本机复验**，换 Retina 机器要实测一次。
-8. **`at` 坐标没校验**，`"abc"` 会变成 NaN 一路传到点击，表现是"点了但什么也没发生"。
-   现在格式不对直接报错。
-
-顺带补齐的：
-- `read_session` 加 `before` 翻页（一个会话有上万条，只给 limit 无法回溯）
-- `search` 同时搜会话标题（按标题找会话是最高频用法）
-- `minimax_watch` 加 `action: "config"` 持久化策略（定时任务没法带参数）
-- `minimax_activate` 在 App 没启动时会尝试拉起，而不是直接报错
-
-## 2026-10-31 自查抓出的 8 个问题（都修了，别再改回去）
-
-1. **`get_result` 传了不存在的 sessionId 会静默换成"最近活跃会话"**。
-   调用方拿到别人的结果还以为是自己要的——比报错危险得多。现在显式传就必须能解析，否则报错。
-2. **`stdio-server.js` 里有两个 `emit`**。后定义的那个把通知塞进数组、只在收到客户端消息时才冲刷，
-   而客户端订阅完就是等——通知永远发不出去。函数声明会提升，后一个覆盖前一个，肉眼极难发现。
-   现在只保留一个，直接写 stdout。
-3. **任务轮询器调 `waitForResult(…, 1, 0)`**：timeout=1 秒、间隔 0ms，等于每个任务空转烧 1 秒 CPU，
-   50 个任务就是 50 秒满载。拆出 `checkResult()` 做单次检查。
-4. **`db.status()` 用 `status='running'` 统计在跑任务**，而表里只有终态值，永远是 0。
-   改成 `ended_at_ms is null`。
-5. **SQL 占位符用 `sql.replace(/\?/g)`**，字符串字面量里的问号也会被替换，参数错位。
-   改成扫描单引号内外。
-6. **主窗口宽度阈值硬编码 800**（在 5K 屏量的）。用户把窗口拖到 700 宽，所有控制类工具报"找不到窗口"。
-   改成 320，并优先用焦点窗口。
-7. **截图区域乘了 backing scale**。`screencapture -R` 吃的是屏幕点，乘了会截到偏移且放大两倍的区域。
-   **注意：本机 scale=1，这条无法在本机复验**，换 Retina 机器要实测一次。
-8. **`at` 坐标没校验**，`"abc"` 会变成 NaN 一路传到点击，表现是"点了但什么也没发生"。
-   现在格式不对直接报错。
-
-顺带补齐的：
-- `read_session` 加 `before` 翻页（一个会话有上万条，只给 limit 无法回溯）
-- `search` 同时搜会话标题（按标题找会话是最高频用法）
-- `minimax_watch` 加 `action: "config"` 持久化策略（定时任务没法带参数）
-- `minimax_activate` 在 App 没启动时会尝试拉起，而不是直接报错
-
-## 2026-10-31 09:40-10:00 真机跑通两条核心链路（此前从未验证）
-
-用户追问"为什么不行"，逼出了这次实测。结论：**能跑，而且发现第 9 个 bug。**
-
-### 已验证
-1. **`answer_question` 真提交**（第一次完整走完）：
-   造了一个低风险提问（`ask_a4e35fd0…`，「要不要继续？」，continue 标推荐）→
-   OCR 定位选项 → 点击 (1529,1170) → 数据库状态 `pending → answered` →
-   MiniMax 收到并回复"你的回答 | **继续**"。耗时 1775ms。
-2. **自动代答**：新提问 `ask_afd17e57…` 出现后，`minimax_watch` 自己判定
-   "低风险 + 有推荐 + 人离开够久" → 自动点选项 → `verified: true` →
-   MiniMax 回"第二次问卷已发出，你的回答已收到"。审计里有 `answer_question` 记录。
-3. **审计覆盖自动动作**：watch 内部走 `callTool`，所以代答同样落审计，不是法外之地。
-
-### 第 9 个 bug：`minimax_new_task` 永远报 `opened:false`
-⌘N 多数情况是**同一窗口内换视图**，不是开新窗口。原实现只比窗口列表，所以永远检测不到。
-现在加了第二条判据：对比切换前后主区域 OCR 文字量，掉到一半以下就算切换成功
-（实测 1002 → 241）。返回里带 `via: "new-window" | "view-switch" | "unknown"`。
-
-### 自动催促：真机没能复现，改用测试接缝验证
-MiniMax 太能干——我发完消息 400ms 内按 Esc，它照样把回复补完了，"卡住"状态活不过一分钟。
-所以给 `watch.tick` 加了 `briefFn` 注入点：测试传一份合成的 brief（含 stalled 项），
-就能验证"卡住 → decideNudge → execute(send_message, {send:true, force:true})"这条接线。
-**真机端到端的自动催促仍未跑到**，这是环境条件限制，不是代码没写。
-
-### 测试隔离
-`watch` / `audit` / `tasks` 三个模块的数据目录现在支持 `MINIMAX_MCP_HOME` 环境变量。
-`edge.test.js` 会把它指到临时目录——否则跑一次测试就会往真实 `events.jsonl` 里写假事件。
-
-## 2026-10-31 09:40-10:00 真机跑通两条核心链路（此前从未验证）
-
-用户追问"为什么不行"，逼出了这次实测。结论：**能跑，而且发现第 9 个 bug。**
-
-### 已验证
-1. **`answer_question` 真提交**（第一次完整走完）：
-   造了一个低风险提问（`ask_a4e35fd0…`，「要不要继续？」，continue 标推荐）→
-   OCR 定位选项 → 点击 (1529,1170) → 数据库状态 `pending → answered` →
-   MiniMax 收到并回复"你的回答 | **继续**"。耗时 1775ms。
-2. **自动代答**：新提问 `ask_afd17e57…` 出现后，`minimax_watch` 自己判定
-   "低风险 + 有推荐 + 人离开够久" → 自动点选项 → `verified: true` →
-   MiniMax 回"第二次问卷已发出，你的回答已收到"。审计里有 `answer_question` 记录。
-3. **审计覆盖自动动作**：watch 内部走 `callTool`，所以代答同样落审计，不是法外之地。
-
-### 第 9 个 bug：`minimax_new_task` 永远报 `opened:false`
-⌘N 多数情况是**同一窗口内换视图**，不是开新窗口。原实现只比窗口列表，所以永远检测不到。
-现在加了第二条判据：对比切换前后主区域 OCR 文字量，掉到一半以下就算切换成功
-（实测 1002 → 241）。返回里带 `via: "new-window" | "view-switch" | "unknown"`。
-
-### 自动催促：真机没能复现，改用测试接缝验证
-MiniMax 太能干——我发完消息 400ms 内按 Esc，它照样把回复补完了，"卡住"状态活不过一分钟。
-所以给 `watch.tick` 加了 `briefFn` 注入点：测试传一份合成的 brief（含 stalled 项），
-就能验证"卡住 → decideNudge → execute(send_message, {send:true, force:true})"这条接线。
-**真机端到端的自动催促仍未跑到**，这是环境条件限制，不是代码没写。
-
-### 测试隔离
-`watch` / `audit` / `tasks` 三个模块的数据目录现在支持 `MINIMAX_MCP_HOME` 环境变量。
-`edge.test.js` 会把它指到临时目录——否则跑一次测试就会往真实 `events.jsonl` 里写假事件。
+- 设计取舍（`brief` 优先级、三档风险、审计、主动巡检四道闸、`ask_human` vs `skip`）与 2026-10-31 真机排坑全记录：[docs/design-and-pitfalls.md](docs/design-and-pitfalls.md)
+- 配套 Agent Skill：[skills/minimax-mcp/SKILL.md](skills/minimax-mcp/SKILL.md)

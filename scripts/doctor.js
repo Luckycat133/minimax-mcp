@@ -39,30 +39,11 @@ const gui = path.join(__dirname, '..', 'scripts', 'mac_gui.py');
 check('mac_gui.py 存在', fs.existsSync(gui), gui);
 
 const perm = tryRun('python3', [gui, 'check']);
-const cuaCli = path.join(__dirname, '..', '..', 'codex-computer-use-mcp', 'bin', 'cua');
-const cuaAvailable = fs.existsSync(cuaCli);
-const permOk = (perm.ok && /已授权/.test(perm.out)) || cuaAvailable;
-check('辅助功能权限', permOk, permOk 
-  ? (cuaAvailable ? '已通过 Codex Computer Use 原生授权' : perm.out.split('\n')[0]) 
-  : (perm.out.split('\n')[0] || '未授权（普通 Agent 请运行 node scripts/setup-permissions.js 一键开启）'));
+const permOk = perm.ok && /已授权/.test(perm.out);
+console.log(`[信息] 辅助功能权限${permOk ? '已授权' : '未授权'}，仅旧版坐标操作需要`);
 
 const app = '/Applications/MiniMax Code.app';
 check('MiniMax Code 已安装', fs.existsSync(app), app);
-
-// OCR：Swift 工具链 + Vision 识别能否真的跑出字
-const ocrSrc = path.join(__dirname, '..', 'scripts', 'ocr.swift');
-check('ocr.swift 存在', fs.existsSync(ocrSrc), ocrSrc);
-let ocrOk = false;
-let ocrDetail = '未测试';
-try {
-  const ocr = require(path.join(__dirname, '..', 'src/gateway/ocr'));
-  ocr.ensureBinary();
-  ocrOk = true;
-  ocrDetail = `${ocr.BIN} 已就绪`;
-} catch (err) {
-  ocrDetail = String(err.message).slice(0, 160);
-}
-check('OCR 可编译可用', ocrOk, ocrDetail);
 
 let failed = 0;
 for (const c of checks) {

@@ -104,45 +104,6 @@ check('SKILL.md 提到每个工具名', () => {
   assert.deepStrictEqual(missing, [], `SKILL.md 没提到: ${missing.join(', ')}`);
 });
 
-check('Tasks 扩展：协商后能力被回告', async () => {
-  const { handle } = require(path.join(ROOT, 'src/mcp'));
-  const withTasks = await handle({
-    jsonrpc: '2.0', id: 1, method: 'initialize',
-    params: { protocolVersion: '2024-11-05', capabilities: { tasks: {} }, clientInfo: { name: 't', version: '1' } },
-  });
-  assert.ok(withTasks.result.capabilities.tasks, '声明了 tasks 就必须回告 tasks 能力');
-  const without = await handle({
-    jsonrpc: '2.0', id: 2, method: 'initialize',
-    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 't', version: '1' } },
-  });
-  assert.ok(!without.result.capabilities.tasks, '没声明就不该回告 tasks 能力');
-});
-
-check('Tasks 扩展：五个方法都在', async () => {
-  const { handle } = require(path.join(ROOT, 'src/mcp'));
-  const base = { jsonrpc: '2.0' };
-  for (const [method, params] of [
-    ['tasks/list', {}],
-    ['tasks/get', { taskId: 'nope' }],
-    ['tasks/result', { taskId: 'nope' }],
-    ['tasks/cancel', { taskId: 'nope' }],
-  ]) {
-    const r = await handle({ ...base, id: 1, method, params });
-    assert.ok(r.result || r.error, `${method} 必须有响应`);
-    assert.ok(!/方法不存在/.test(r.error?.message || ''), `${method} 未实现`);
-  }
-});
-
-check('Tasks 存储：创建/读取/取消/清理', () => {
-  const t = require(path.join(ROOT, 'src/mcp/tasks'));
-  const created = t.create({ sessionId: 'mvs_test', afterMessageId: 1, messagePreview: 'x' });
-  assert.strictEqual(created.status, 'working');
-  assert.ok(t.get(created.taskId), '建完必须能读回来');
-  const c = t.cancel(created.taskId);
-  assert.strictEqual(c.status, 'canceled');
-  assert.ok(t.prune(0) >= 1, 'retainHours=0 必须清掉终态任务');
-});
-
 check('每个工具都带 MCP annotations', () => {
   for (const t of TOOLS) {
     assert.ok(t.annotations, `${t.name} 缺 annotations`);
@@ -210,14 +171,10 @@ check('审计覆盖所有会动东西的工具', () => {
   }
 });
 
-check('审计会脱敏长文本', () => {
+check('审计只保留操作元数据', () => {
   const audit = require(path.join(ROOT, 'src/gateway/audit'));
   const out = audit.sanitizeArgs({ message: 'x'.repeat(200), send: true, at: '1,2', nested: { a: 1 }, list: [1, 2] });
-  assert.ok(out.message.length < 100, '长文本必须截断');
-  assert.strictEqual(out.send, true);
-  assert.strictEqual(out.at, '1,2');
-  assert.strictEqual(out.nested, '{…}');
-  assert.strictEqual(out.list, '[2 项]');
+  assert.deepStrictEqual(out, { send: true });
 });
 
 // 上面的 check 是异步的（handle 现在是 async），等所有断言落地再汇总

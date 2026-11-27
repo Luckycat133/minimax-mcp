@@ -1,104 +1,55 @@
 'use strict';
-/**
- * bot.js — MiniMax Bot 团队通信客户端与名册解析引擎。
- *
- * 1. 零代理直连：通过 CDP 动态探测 MiniMax Bot 本地服务 (loopback 端口与认证令牌)。
- * 2. 团队名册与人类可读解析：解析 ~/.minimax/v2/plugin-data/liveboards/minimax-bot/state.json，
- *    支持直接使用中文名称（如「剪辑师」、「导演」、「幸喵剪辑室」）分发指令。
- * 3. 双模容灾读取：优先走本地 HTTP 实时 API，若未激活 Webview 则无缝回退至本地磁盘 JSON 归档，
- *    确保 100% 读可靠性。
- */
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { randomUUID } = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
+const { MiniMaxCDPDriver, cdp } = require('./cdp');
+const { requireFront } = require('./desktop');
+const db = require('./db');
 
 const BOT_STATE_PATH = path.join(os.homedir(), '.minimax/v2/plugin-data/liveboards/minimax-bot/state.json');
 const BOT_MESSAGES_DIR = path.join(os.homedir(), '.minimax/v2/plugin-data/liveboards/minimax-bot/messages');
 
-let cachedPort = null;
-let cachedToken = null;
-let lastDiscoveryAt = 0;
-let discoveryPromise = null;
+const BOT_PLUGIN = 'minimax-bot';
+const BOT_PATHS = ['/bot', '/bot/'];
+const BOT_OPEN_HINT = '先调用 minimax_bot({action:"open"}) 连接 Bot Studio';
+const CHAT_ID = /^(?:bot|group):[A-Za-z0-9_]+$/;
+const MESSAGE_ID = /^msg_[A-Za-z0-9]+$/;
 
-async function discoverBotTarget(forceRefresh = false) {
-  const now = Date.now();
-  if (!forceRefresh && cachedPort && cachedToken && (now - lastDiscoveryAt < 60000)) {
-    return { port: cachedPort, token: cachedToken };
-  }
+const botCdp = new MiniMaxCDPDriver({
+  targetName: 'Bot Studio',
+  matchesTarget: (target) => {
+    if (!['page', 'webview'].includes(target.type)) return false;
+    if (!URL.canParse(target.url)) return false;
+    const url = new URL(target.url);
+    return url.protocol === 'http:' && url.hostname === '127.0.0.1' && url.port && BOT_PATHS.includes(url.pathname);
+  },
+});
 
-  if (discoveryPromise) return discoveryPromise;
+function chatPath(chatId, suffix) {
+  if (!CHAT_ID.test(chatId)) throw new Error('无效的 Bot chatId，请从名册复制');
+  // Bot Studio routes on URL.pathname and expects the colon literally.
+  return `/api/chats/${chatId}/${suffix}`;
+}
 
-  discoveryPromise = (async () => {
-    try {
-      const cdpPort = Number(process.env.MINIMAX_CDP_PORT) || 9223;
-      const r = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
-      if (!r || !r.ok) {
-        throw new Error('MiniMax CDP 未在线 (端口 ' + cdpPort + ')，无法自动探测 Bot 目标');
-      }
-      const targets = await r.json();
-      const botTarget = targets.find((t) => t.url && t.url.includes('/bot'));
-      if (!botTarget) {
-        throw new Error('MiniMax Bot webview 尚未在客户端中激活（可通过 CDP 点击「插件・技能」或启动 Bot）');
-      }
+function serviceError(response) {
+  return new Error(`Bot Studio 返回 HTTP ${response.status}${response.data?.message ? '，' + response.data.message : ''}`);
+}
 
-      const port = new URL(botTarget.url).port;
-      const wsUrl = botTarget.webSocketDebuggerUrl;
-      if (!wsUrl) throw new Error('Bot target 缺少调试 WebSocket');
+function presentBotMessage(message) {
+  if (message?.role !== 'bot' || message.status !== 'error' ||
+      message.errorCode !== 'REQUEST_CANCELLED' || message.sessionId) return message;
 
-      const token = await new Promise((resolve, reject) => {
-        const ws = new WebSocket(wsUrl);
-        const timer = setTimeout(() => {
-          try { ws.close(); } catch {}
-          reject(new Error('捕获 Bot 本地令牌超时 (5s)'));
-        }, 5000);
-
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ id: 1, method: 'Network.enable' }));
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            if (msg.id === 1) {
-              ws.send(JSON.stringify({
-                id: 2,
-                method: 'Runtime.evaluate',
-                params: { expression: 'fetch("/api/state").then(r => r.status)' },
-              }));
-            }
-            if (msg.method === 'Network.requestWillBeSentExtraInfo') {
-              clearTimeout(timer);
-              const headers = msg.params.headers || {};
-              const captured = headers['x-mavis-miniapp-token'] || headers['X-Mavis-Miniapp-Token'];
-              try { ws.close(); } catch {}
-              if (captured) resolve(captured);
-              else reject(new Error('未在请求头中发现 x-mavis-miniapp-token'));
-            }
-          } catch (e) {
-            clearTimeout(timer);
-            try { ws.close(); } catch {}
-            reject(e);
-          }
-        };
-
-        ws.onerror = (err) => {
-          clearTimeout(timer);
-          try { ws.close(); } catch {}
-          reject(err);
-        };
-      });
-
-      cachedPort = port;
-      cachedToken = token;
-      lastDiscoveryAt = Date.now();
-      return { port, token };
-    } finally {
-      discoveryPromise = null;
-    }
-  })();
-
-  return discoveryPromise;
+  // The Host rejected the request before delivery. Bot Studio 0.7.24 records the
+  // rejection as an error. A missing sessionId alone never proves cancellation.
+  const { error, errorCode, retryable, retryInput, ...fields } = message;
+  return {
+    ...fields,
+    status: 'aborted',
+    cancellation: { phase: 'before-admission', code: errorCode, pluginStatus: 'error' },
+  };
 }
 
 /**
@@ -140,34 +91,85 @@ class MiniMaxBotClient {
     this.customBaseUrl = customBaseUrl ? customBaseUrl.replace(/\/+$/, '') : null;
   }
 
-  async _request(path, options = {}) {
-    let url = '';
-    const headers = { ...(options.headers || {}) };
-
+  async _request(route, method = 'GET', body) {
+    const options = {
+      method, redirect: 'error', cache: 'no-store',
+      ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    };
     if (this.customBaseUrl) {
-      url = `${this.customBaseUrl}${path}`;
-    } else {
-      const { port, token } = await discoverBotTarget();
-      url = `http://127.0.0.1:${port}${path}`;
-      headers['x-mavis-miniapp-token'] = token;
+      const response = await fetch(this.customBaseUrl + route, { ...options, signal: AbortSignal.timeout(3500) });
+      return { status: response.status, ok: response.ok, data: await response.json().catch(() => null) };
     }
 
-    let res = await fetch(url, { ...options, headers });
-    if (res.status === 401 && !this.customBaseUrl) {
-      const refreshed = await discoverBotTarget(true);
-      headers['x-mavis-miniapp-token'] = refreshed.token;
-      url = `http://127.0.0.1:${refreshed.port}${path}`;
-      res = await fetch(url, { ...options, headers });
+    // Let Electron authenticate the same-origin request in the registered webview.
+    const response = await botCdp.evaluate(`(async ({ route, options, paths }) => {
+      if (location.protocol !== 'http:' || location.hostname !== '127.0.0.1' ||
+          !paths.includes(location.pathname) || document.title !== 'MiniMax Bot' || !document.querySelector('#side-list')) {
+        return { pageUnavailable: true };
+      }
+      const response = await fetch(route, { ...options, signal: AbortSignal.timeout(3500) });
+      return { status: response.status, ok: response.ok, data: await response.json().catch(() => null) };
+    })(${JSON.stringify({ route, options, paths: BOT_PATHS })})`).catch((error) => {
+      if (error.message.startsWith('CDP discovery failed:')) return { pageUnavailable: true };
+      throw error;
+    });
+    if (response?.pageUnavailable) throw Object.assign(new Error(BOT_OPEN_HINT), { code: 'BOT_PAGE_UNAVAILABLE' });
+    if (!response) throw new Error('Bot Studio 未返回可解析的接口响应');
+    return response;
+  }
+
+  async _get(route, method, body) {
+    const response = await this._request(route, method, body);
+    if (!response.ok) throw serviceError(response);
+    if (!response.data || typeof response.data !== 'object') throw new Error('Bot Studio 返回了未知格式');
+    return response.data;
+  }
+
+  async open(sessionId, ctx) {
+    if (ctx?.shouldStop?.()) throw new Error('客户端已取消打开 Bot Studio');
+    const sid = sessionId === undefined ? null : db.resolveSession(sessionId);
+    if (sessionId !== undefined && !sid) throw new Error('找不到会话或前缀不唯一，请使用完整 sessionId');
+    const isReady = () => this._get('/api/state').then((state) => Array.isArray(state?.bots)).catch(() => false);
+    if (await isReady()) return { opened: true, source: 'live', via: this.customBaseUrl ? 'gateway' : 'existing-tab' };
+    if (this.customBaseUrl) throw new Error('已配置的 Bot Studio 网关未返回有效状态');
+    requireFront();
+    if (!await cdp.isAvailable()) throw new Error('打开 Bot Studio 需要 MiniMax CDP 已连接');
+
+    if (sid) {
+      if (ctx?.shouldStop?.()) throw new Error('客户端已取消打开 Bot Studio');
+      const selected = await cdp.switchSession(sid);
+      if (!selected?.ok) throw new Error(selected?.error || '未能打开目标会话');
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        const current = await cdp.controlContext(sid);
+        if (current?.windowFocused === false) throw new Error('MiniMax 窗口已失去前台焦点');
+        if (current?.activeSessionId === sid) break;
+        if (attempt === 11) throw new Error('MiniMax 未确认目标会话');
+        await delay(150);
+      }
     }
-    return res;
+    if (ctx?.shouldStop?.()) throw new Error('客户端已取消打开 Bot Studio');
+    requireFront();
+    const result = await cdp.openMiniApp(BOT_PLUGIN, sid);
+    if (result?.code === 'session_not_active') throw new Error('请指定现有原生会话的 sessionId 来打开 Bot Studio');
+    if (!result?.success || result.tab?.surfaceKind !== 'miniapp' || result.tab?.miniApp?.pluginId !== BOT_PLUGIN) {
+      throw new Error(`MiniMax 未确认 Bot Studio 标签页${result?.code ? '，' + result.code : ''}`);
+    }
+    const deadline = Date.now() + 4500;
+    do {
+      if (await isReady()) return { opened: true, source: 'live', via: 'miniapp', tabId: result.tab.tabId };
+      if (ctx?.shouldStop?.()) {
+        return { opened: true, source: null, tabId: result.tab.tabId, note: '标签页已打开，客户端已取消等待实时服务' };
+      }
+      await delay(250);
+    } while (Date.now() < deadline);
+    return { opened: true, source: null, tabId: result.tab.tabId, note: 'Bot Studio 标签页已打开，实时服务尚未确认' };
   }
 
   /**
    * 获取团队名册与架构（群聊流水线、成员角色、工具与底层 sessionId 映射）。
    * 优先读磁盘 state.json（极速、免开销、无论 webview 是否运行均可用）。
    */
-  getRoster() {
-    const state = readBotStateOnDisk();
+  getRoster(state = readBotStateOnDisk()) {
     if (!state) {
       return {
         groups: [],
@@ -249,8 +251,15 @@ class MiniMaxBotClient {
   /**
    * 将人类可读的名称（如「剪辑师」、「幸喵剪辑室」）解析为内部目标规范。
    */
-  resolveTarget(target, mode = 'direct') {
-    const roster = this.getRoster();
+  resolveTarget(target, mode = 'direct', { exact = false } = {}) {
+    const trimmed = String(target ?? '').trim();
+    if (trimmed.startsWith('group:') || trimmed.startsWith('bot:')) {
+      if (!CHAT_ID.test(trimmed)) throw new Error('无效的 Bot chatId，请从名册复制');
+      const [type, id] = trimmed.split(':');
+      return { type, chatId: trimmed, id, name: trimmed };
+    }
+    const state = readBotStateOnDisk();
+    const roster = this.getRoster(state);
     if (!target) {
       // 默认第一个群聊
       if (roster.groups.length > 0) {
@@ -264,20 +273,10 @@ class MiniMaxBotClient {
       throw new Error('未指定 target 且本地无群聊配置');
     }
 
-    const trimmed = String(target).trim();
-
-    // 1. 直接是 chatId 格式
-    if (trimmed.startsWith('group:') || trimmed.startsWith('bot:')) {
-      return {
-        type: trimmed.startsWith('group:') ? 'group' : 'bot',
-        chatId: trimmed,
-        id: trimmed.split(':')[1],
-        name: trimmed,
-      };
-    }
-
-    // 2. 匹配群聊名称
-    const matchedGroup = roster.groups.find((g) => g.name === trimmed || g.id === trimmed);
+    const groups = roster.groups.filter((g) => g.name === trimmed || g.id === trimmed);
+    const bots = roster.bots.filter((b) => b.name === trimmed || b.role === trimmed || b.id === trimmed);
+    if (exact && groups.length + bots.length > 1) throw new Error('目标名称匹配多个对话，请使用名册中的 chatId');
+    const matchedGroup = groups[0];
     if (matchedGroup) {
       return {
         type: 'group',
@@ -287,12 +286,12 @@ class MiniMaxBotClient {
       };
     }
 
-    // 3. 匹配 Bot 成员名称或角色
-    const matchedBot = roster.bots.find((b) => b.name === trimmed || b.role === trimmed || b.id === trimmed || (b.name && trimmed.includes(b.name)));
+    const matchedBot = bots[0] || (!exact && roster.bots.find((b) => b.name && trimmed.includes(b.name)));
     if (matchedBot) {
       if (mode === 'group') {
-        const group = roster.groups[0];
-        if (!group) throw new Error('无法在群聊模式中指定 Bot：当前没有配置群聊');
+        const matches = roster.groups.filter((g) => g.members.some((member) => member.id === matchedBot.id));
+        if (matches.length !== 1) throw new Error('成员需要唯一的所属群聊。请直接指定群聊 chatId 并在消息中 @成员');
+        const [group] = matches;
         return {
           type: 'group',
           chatId: group.chatId,
@@ -301,7 +300,7 @@ class MiniMaxBotClient {
           botId: matchedBot.id,
           botName: matchedBot.name,
           prefix: `@${matchedBot.name} `,
-          sessionId: matchedBot.groupSessionId,
+          sessionId: state?.sessions?.[group.chatId]?.[matchedBot.id]?.sessionId || null,
         };
       }
 
@@ -321,84 +320,63 @@ class MiniMaxBotClient {
     throw new Error(`找不到目标「${trimmed}」。可选群聊: [${groupNames}]；可选成员: [${botNames}]`);
   }
 
-  async getState() {
+  async listMessages(chatId, limit = 20) {
+    const route = chatPath(chatId, `messages?limit=${limit}`);
+    let response;
+    let reason;
     try {
-      const res = await this._request('/api/state');
-      if (res.ok) return await res.json();
-    } catch {}
-    // 回退磁盘数据
-    return readBotStateOnDisk() || { error: 'Bot 本地服务未连接且无本地缓存' };
-  }
-
-  async listMessages(chatId = 'group:grp_d631733f2e13', limit = 20) {
-    try {
-      const res = await this._request(`/api/chats/${encodeURIComponent(chatId)}/messages?limit=${limit}`);
-      if (res.ok) {
-        const data = await res.json();
-        return { source: 'live', chatId, messages: data };
-      }
-    } catch {
-      // 容灾走本地磁盘归档
+      response = await this._request(route);
+    } catch (error) {
+      reason = error.message;
+    }
+    if (response?.status === 404) throw serviceError(response);
+    const { data } = response || {};
+    const messages = Array.isArray(data) ? data : data?.messages;
+    if (response?.ok && Array.isArray(messages) && (!data.chatId || data.chatId === chatId)) {
+      return { source: 'live', chatId, messages: messages.map(presentBotMessage) };
     }
 
-    const diskMsgs = readMessagesFromDisk(chatId, limit);
     return {
       source: 'disk',
       chatId,
-      messages: diskMsgs,
-      note: 'Bot 本地 Webview 未激活，已从磁盘数据归档读取历史消息',
+      messages: readMessagesFromDisk(chatId, limit).map(presentBotMessage),
+      note: '实时历史暂不可用，已查询本地缓存。' + (reason || (response?.ok ? '实时服务返回了未知格式' : serviceError(response).message)),
     };
   }
 
-  async sendMessage(chatId, text) {
-    if (!chatId || !text) throw new Error('chatId 和 text 不能为空');
+  async sendMessage(chatId, text, clientMessageId = randomUUID()) {
+    const route = chatPath(chatId, 'messages');
+    const uncertain = (note) => ({ sent: null, verified: false, clientMessageId, note: note + '。请先读历史核对该 clientMessageId' });
+    let response;
     try {
-      const res = await this._request(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw new Error(`发送消息失败 (${chatId}): HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      // 若是由于 webview 未激活导致无法发送，给出明确引导
-      const roster = this.getRoster();
-      const bot = roster.bots.find((b) => b.chatId === chatId || b.directSessionId === chatId);
-      let sessionNote = '';
-      if (bot && bot.directSessionId) {
-        sessionNote = `。提示：该 Bot 对应的 Native Agent 会话 ID 为 ${bot.directSessionId}，你也可以使用 minimax_send_message(sessionId="${bot.directSessionId}") 直接对其驱动执行。`;
-      }
-      throw new Error(`无法发送消息到 Bot 本地服务: ${err.message}${sessionNote}`);
+      response = await this._request(route, 'POST', { text, clientMessageId });
+    } catch (error) {
+      if (error.code === 'BOT_PAGE_UNAVAILABLE') throw error;
+      return uncertain('未收到 Bot Studio 发送回执');
     }
+    if (response.status >= 500 || response.data?.error === 'delivery_uncertain') return uncertain(serviceError(response).message);
+    if (!response.ok) throw serviceError(response);
+    const message = response.data?.message;
+    if (!message?.id || message.chatId !== chatId || message.role !== 'user' ||
+        typeof message.text !== 'string' || message.text.trim() !== text.trim() || message.clientMessageId !== clientMessageId) {
+      return uncertain('Bot Studio 发送回执与请求不符');
+    }
+    return { sent: true, verified: true, messageId: message.id, clientMessageId, message };
   }
 
-  async cancelTurn(chatId) {
-    if (!chatId) throw new Error('chatId 不能为空');
-    const res = await this._request(`/api/chats/${encodeURIComponent(chatId)}/cancel`, {
-      method: 'POST',
-    });
-    if (!res.ok) throw new Error(`取消轮次失败 (${chatId}): HTTP ${res.status}`);
-    return await res.json();
+  cancelTurn(chatId) {
+    return this._get(chatPath(chatId, 'cancel'), 'POST');
   }
 
-  async resumePending(chatId) {
-    if (!chatId) throw new Error('chatId 不能为空');
-    const res = await this._request(`/api/chats/${encodeURIComponent(chatId)}/resume-pending`, {
-      method: 'POST',
-    });
-    if (!res.ok) throw new Error(`恢复待处理消息失败 (${chatId}): HTTP ${res.status}`);
-    return await res.json();
+  resumePending(chatId) {
+    return this._get(chatPath(chatId, 'resume-pending'), 'POST');
   }
 
   async answerQuestion(chatId, messageId, answers) {
-    if (!chatId || !messageId || !answers) throw new Error('chatId, messageId, answers 均不能为空');
-    const res = await this._request(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/answer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ answers }),
-    });
-    if (!res.ok) throw new Error(`提交问卷回答失败 (${messageId}): HTTP ${res.status}`);
-    return await res.json();
+    if (!MESSAGE_ID.test(messageId)) throw new Error('无效的 Bot 卡片 messageId');
+    const payload = answers.map((answer) => ({ selectedOther: false, ...answer }));
+    const data = await this._get(chatPath(chatId, `messages/${messageId}/answer`), 'POST', { answers: payload });
+    return { ...data, accepted: data?.ok === true };
   }
 }
 
@@ -407,5 +385,4 @@ const defaultBotClient = new MiniMaxBotClient();
 module.exports = {
   MiniMaxBotClient,
   botClient: defaultBotClient,
-  discoverBotTarget,
 };

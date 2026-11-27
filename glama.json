@@ -4,7 +4,7 @@
     "Luckycat133"
   ],
   "name": "MiniMax Code MCP",
-  "description": "Local-first stdio MCP server and Agent Skill that lets AI agents read every MiniMax Code conversation and drive its UI on the user's Mac.",
+  "description": "Local stdio MCP for MiniMax Code sessions, task results, Bot Studio, questionnaires, and quota on macOS.",
   "repository": "https://github.com/Luckycat133/minimax-mcp",
   "homepage": "https://github.com/Luckycat133/minimax-mcp",
   "license": "MIT",

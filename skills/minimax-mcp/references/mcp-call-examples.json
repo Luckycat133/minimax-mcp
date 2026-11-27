@@ -1,165 +1,244 @@
 {
-  "note": "JSON-RPC over stdio，一行一条。examples 按常见诉求排序。",
+  "note": "完成 MCP initialize 握手后，将每个请求序列化为单行 JSON 发往 stdio。示例中的会话、问卷、消息 ID 请替换为实际返回值。",
   "examples": [
     {
-      "intent": "巡检所有会话的最新进展",
+      "intent": "检查运行状态和会话近况",
       "calls": [
         {
+          "jsonrpc": "2.0",
+          "id": 1,
           "method": "tools/call",
           "params": {
-            "name": "minimax_tail_sessions",
-            "arguments": {
-              "count": 6,
-              "perSession": 2
-            }
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_pending",
+            "name": "minimax_status",
             "arguments": {}
           }
         },
         {
+          "jsonrpc": "2.0",
+          "id": 2,
           "method": "tools/call",
           "params": {
-            "name": "minimax_tasks",
+            "name": "minimax_session",
             "arguments": {
-              "status": "running"
+              "perSession": 2,
+              "limit": 3
             }
           }
         }
       ]
     },
     {
-      "intent": "读某个会话的完整上下文",
+      "intent": "搜索会话并往前翻阅历史",
       "calls": [
         {
+          "jsonrpc": "2.0",
+          "id": 3,
           "method": "tools/call",
           "params": {
-            "name": "minimax_read_session",
+            "name": "minimax_session",
             "arguments": {
-              "session": "3",
-              "limit": 30,
-              "includeThinking": false
+              "query": "Blender 立冬",
+              "limit": 5
             }
           }
-        }
-      ]
-    },
-    {
-      "intent": "往当前会话推一句话（先不发送）",
-      "calls": [
+        },
         {
+          "jsonrpc": "2.0",
+          "id": 4,
           "method": "tools/call",
           "params": {
-            "name": "minimax_send_message",
+            "name": "minimax_session",
             "arguments": {
-              "message": "继续，把剩下的跑完给我结论",
-              "send": false
+              "sessionId": "mvs_example",
+              "limit": 10
             }
           }
-        }
-      ]
-    },
-    {
-      "intent": "发送前先预览（只读，报告坐标/遮挡/守卫）",
-      "calls": [
+        },
         {
+          "jsonrpc": "2.0",
+          "id": 5,
           "method": "tools/call",
           "params": {
-            "name": "minimax_send_message",
+            "name": "minimax_session",
             "arguments": {
-              "message": "…",
-              "send": true,
-              "preview": true
+              "sessionId": "mvs_example",
+              "before": 120,
+              "limit": 10
             }
           }
         }
       ],
-      "expect": "preview=true，含 inputAt / overlay / activeApp / guard；没有任何点击或输入"
+      "note": "before 使用上一页返回的 oldestId。"
     },
     {
-      "intent": "发送并确认入库",
+      "intent": "只读预览原生 Agent 的发送计划",
       "calls": [
         {
+          "jsonrpc": "2.0",
+          "id": 6,
           "method": "tools/call",
           "params": {
-            "name": "minimax_send_message",
+            "name": "minimax_agent",
             "arguments": {
-              "message": "继续，把剩下的跑完给我结论",
-              "send": true,
-              "layout": "chat"
+              "sessionId": "mvs_example",
+              "message": "概括这轮测试的结果",
+              "preview": true,
+              "send": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "intent": "授权后发送原生任务并查询本轮结果",
+      "calls": [
+        {
+          "jsonrpc": "2.0",
+          "id": 7,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_agent",
+            "arguments": {
+              "sessionId": "mvs_example",
+              "message": "概括这轮测试的结果",
+              "send": true
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 8,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_agent",
+            "arguments": {
+              "action": "result",
+              "sessionId": "mvs_example",
+              "afterMessageId": 123
             }
           }
         }
       ],
-      "expect": "verified=true 且带 sessionId/messageId；verified=false 表示没发出去",
-      "note": "若当前会话不久前还在活动会被守卫拒绝；确认要发加 force:true，或调大 quietSeconds"
+      "note": "发送返回 sent:true、verified:true 后，用实际 messageId 替换 afterMessageId。若 sent:null，先读目标会话确认。"
     },
     {
-      "intent": "新建任务页输入（输入框在页面中部）",
+      "intent": "查 Bot 名册和指定成员的对话",
       "calls": [
         {
+          "jsonrpc": "2.0",
+          "id": 9,
           "method": "tools/call",
           "params": {
-            "name": "minimax_key",
+            "name": "minimax_bot",
+            "arguments": {}
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 10,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_bot",
             "arguments": {
-              "key": "n",
-              "modifiers": [
-                "cmd"
+              "target": "剪辑师",
+              "limit": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "intent": "激活 MiniMax 后停止已发送的这一轮",
+      "calls": [
+        {
+          "jsonrpc": "2.0",
+          "id": 14,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_agent",
+            "arguments": { "action": "activate" }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 15,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_agent",
+            "arguments": { "action": "stop", "sessionId": "mvs_example", "afterMessageId": 123 }
+          }
+        }
+      ],
+      "note": "afterMessageId 使用发送回执的 messageId。"
+    },
+    {
+      "intent": "打开 Bot Studio 后读取实时对话",
+      "calls": [
+        {
+          "jsonrpc": "2.0",
+          "id": 16,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_bot",
+            "arguments": { "action": "open", "sessionId": "mvs_example" }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 17,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_bot",
+            "arguments": { "action": "read", "target": "bot:bot_example", "limit": 5 }
+          }
+        }
+      ],
+      "note": "新标签页需要 MiniMax 在前台。用 source:live 核对实时连接。"
+    },
+    {
+      "intent": "查看待答问卷及推荐答案",
+      "calls": [
+        {
+          "jsonrpc": "2.0",
+          "id": 11,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_questionnaire",
+            "arguments": {}
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 12,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_questionnaire",
+            "arguments": {
+              "requestId": "ask_example"
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 13,
+          "method": "tools/call",
+          "params": {
+            "name": "minimax_questionnaire",
+            "arguments": {
+              "requestId": "ask_example",
+              "selections": [
+                {
+                  "stepId": "step_example",
+                  "optionIds": [
+                    "option_example"
+                  ]
+                }
               ]
             }
           }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_send_message",
-            "arguments": {
-              "message": "任务内容",
-              "send": true,
-              "layout": "newtask"
-            }
-          }
         }
-      ]
-    },
-    {
-      "intent": "截图看界面，再按坐标点按钮",
-      "calls": [
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_screenshot",
-            "arguments": {
-              "mode": "screen",
-              "name": "check"
-            }
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_click",
-            "arguments": {
-              "x": 678,
-              "y": 597
-            }
-          }
-        },
-        {
-          "method": "tools/call",
-          "params": {
-            "name": "minimax_screenshot",
-            "arguments": {
-              "mode": "screen",
-              "name": "after"
-            }
-          }
-        }
-      ]
+      ],
+      "note": "提交选项时在相同请求中加 preview:false 和 force:true。"
     }
   ]
 }

@@ -1,15 +1,13 @@
 # minimax-mcp
-> Local-first stdio MCP server & Agent Skill for MiniMax Code desktop app on macOS via CDP & SQLite.
 
-Local-first Model Context Protocol (MCP) server enabling Claude Desktop, Cursor, and AI agents to monitor and automate MiniMax Code on macOS with 27 tools and zero system accessibility permissions.
+> Local stdio MCP server and Agent Skill for MiniMax Code on macOS.
+
+Five tools expose runtime status, session history and search, native agent tasks, Bot Studio conversations, and questionnaires. The runtime SQLite database is read-only. Targeted native session control uses Chrome DevTools Protocol (CDP).
 
 ## Documentation
-- [README](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/README.md): Overview, architecture diagrams, fast CDP control, and client configuration examples.
-- [Agent Skill](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/skills/minimax-mcp/SKILL.md): Agent-native skill instructions and workflow decision boundaries.
-- [Tech Stack Research](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/docs/MCP_TECH_STACK_RESEARCH.md): Architecture evaluation of Chrome DevTools Protocol (CDP), SQLite state-reading, and MCP protocol standards.
-- [Full Documentation](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/llms-full.txt): Complete concatenated reference documentation including tool contracts and examples.
 
-## Optional
-- [Glama Registry Manifest](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/glama.json): Server metadata and tool declarations for Glama.ai MCP registry.
-- [Smithery Configuration](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/smithery.yaml): Registry configuration for Smithery.ai CLI and 1-click installation.
-- [Doctor Diagnostic](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/scripts/doctor.js): 9-point runtime self-diagnostic script.
+- [README](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/README.md) — Requirements, client setup, CDP, and verification commands.
+- [Agent Skill](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/skills/minimax-mcp/SKILL.md) — Session, Bot Studio, and questionnaire workflows.
+- [Tool reference](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/skills/minimax-mcp/references/mcp-surface.md) — Arguments, result fields, and compatibility.
+- [JSON-RPC examples](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/skills/minimax-mcp/references/mcp-call-examples.json) — Calls for the five advertised tools.
+- [Full documentation](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/llms-full.txt) — Standalone English overview.

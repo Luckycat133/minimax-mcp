@@ -104,17 +104,11 @@ function read(region = null, opts = {}) {
         } catch (_) {}
       }
 
-      // 2. 其次回退到 Codex Computer Use (CUA) 原生无障碍截图
       if (!cdpOk) {
-        const cuaScreenshot = path.join(__dirname, '..', '..', '..', 'codex-computer-use-mcp', 'bin', 'cua-screenshot');
-        if (fs.existsSync(cuaScreenshot)) {
-          sh(cuaScreenshot, [tmp], { timeout: 30000 });
-        } else {
-          const hint = /could not create image/i.test(String(scErr.message))
-            ? '屏幕截取失败：请确认当前 Agent 宿主（如 Terminal/Cursor/Claude）已在“系统设置 > 隐私与安全性 > 屏幕录制”中授权，或运行 node scripts/setup-permissions.js'
-            : scErr.message;
-          throw new Error(`OCR 截屏失败：${hint}`);
-        }
+        const hint = /could not create image/i.test(String(scErr.message))
+          ? '屏幕截取失败，请检查宿主的屏幕录制权限'
+          : scErr.message;
+        throw new Error(`OCR 截屏失败：${hint}`);
       }
     }
     const out = validRegion

@@ -11,6 +11,7 @@
 function normalizeSelections(detail, raw) {
   const steps = detail.steps || [];
   const byStep = new Map(steps.map((s) => [s.stepId, s]));
+  const seen = new Set();
   const out = [];
   const errors = [];
 
@@ -25,9 +26,15 @@ function normalizeSelections(detail, raw) {
       errors.push(`没有这一步: ${stepId}（可选: ${steps.map((s) => s.stepId).join(', ')}）`);
       continue;
     }
+    if (seen.has(stepId)) {
+      errors.push(`步骤 ${stepId} 重复作答`);
+      continue;
+    }
+    seen.add(stepId);
     let ids = item.optionIds || item.selectedOptionIds || [];
     if (typeof ids === 'string') ids = [ids];
     if (!Array.isArray(ids)) ids = [];
+    ids = [...new Set(ids)];
 
     const valid = new Set((step.options || []).map((o) => o.optionId));
     const unknown = ids.filter((id) => !valid.has(id));
@@ -40,7 +47,13 @@ function normalizeSelections(detail, raw) {
       ids = ids.slice(0, 1);
     }
     const selectedOther = item.selectedOther === true;
-    const otherText = item.otherText || '';
+    const otherText = typeof item.otherText === 'string' ? item.otherText : '';
+    if (selectedOther && step.allowOther === false) {
+      errors.push(`步骤 ${stepId} 不支持其他选项`);
+    }
+    if (selectedOther && step.selectionMode === 'single' && ids.length) {
+      errors.push(`步骤 ${stepId} 是单选，其他选项不能与普通选项一起选`);
+    }
     if (!ids.length && !selectedOther) {
       errors.push(`步骤 ${stepId} 没有选中任何选项`);
     }

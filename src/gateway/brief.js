@@ -126,8 +126,9 @@ function brief(opts = {}) {
   const sessions = scanSessions(cfg.limit);
 
   // 待回答的提问按会话索引，后面挂到会话上
+  const pending = db.pending();
   const pendingBySession = new Map();
-  for (const q of db.pending()) {
+  for (const q of pending) {
     pendingBySession.set(q.sessionId, q);
   }
 
@@ -156,22 +157,22 @@ function brief(opts = {}) {
         priority: 1,
         kind: 'needs_decision',
         why: `${q.agent || 'agent'} 在等你回答「${oneLine(q.question, 60)}」`,
-        next: `minimax_draft_answer {requestId:"${q.requestId}"} 先看选项和一份建议，再决定要不要 minimax_answer_question`,
+        next: '查看题目和拟答',
         requestId: q.requestId,
-        suggestedCall: { tool: 'minimax_draft_answer', arguments: { requestId: q.requestId } },
+        suggestedCall: { tool: 'minimax_questionnaire', arguments: { requestId: q.requestId } },
       });
       continue;
     }
 
-    // 1.5) 队列冻结 / 熔断挂起（优先度高于普通报错，可直接自愈）
+    // 队列暂停时先显示积压和原因。
     if (s.queue_pause_cause || (s.queued_items && Number(s.queued_items) > 0)) {
       items.push({
         ...base,
         priority: 1.5,
         kind: 'paused_queue',
         why: `消息队列已暂停 (${s.queue_pause_cause || 'turn-final-failure'})，积压 ${s.queued_items || 0} 条未处理消息`,
-        next: `查看会话历史：minimax_session {action:"read", session:"${s.session_id}", limit:3}`,
-        suggestedCall: { tool: 'minimax_session', arguments: { action: 'read', session: s.session_id, limit: 3 } },
+        next: '查看会话历史',
+        suggestedCall: { tool: 'minimax_session', arguments: { sessionId: s.session_id, limit: 3 } },
       });
       continue;
     }
@@ -185,14 +186,17 @@ function brief(opts = {}) {
         kind: isQuota ? 'quota_error' : 'error',
         why: isQuota ? `Token Plan 额度耗尽：${oneLine(s.error_message, 100)}` : `会话报错：${oneLine(s.error_message, 100) || '(没有错误信息)'}`,
         next: isQuota
-          ? '等待额度重置后重新发送指令继续'
-          : '读末条消息看上下文：minimax_session {action:"read", session:"' + s.session_id + '", limit:3}',
+          ? '查 minimax_status 读取 quota.waitSeconds / wakeup.wakeAfterSeconds 并给自己设一次性定时唤醒；恢复后 Bot 对话用 minimax_bot action:"resume"，原生会话对原 sessionId 续发指令'
+          : '读末条消息看上下文',
         suggestedCall: isQuota
           ? { tool: 'minimax_status', arguments: {} }
-          : { tool: 'minimax_session', arguments: { action: 'read', session: s.session_id, limit: 3 } },
+          : { tool: 'minimax_session', arguments: { sessionId: s.session_id, limit: 3 } },
       });
       continue;
     }
+
+    // A stopped turn can end with the user's message as the last row.
+    if (s.status === 'aborted') continue;
 
     // 3) 卡住：最后一条是用户指令，且已经很久没人回
     if (lastRole === 'user' && ageMin !== null && ageMin >= cfg.stalledMinutes) {
@@ -201,8 +205,8 @@ function brief(opts = {}) {
         priority: 3,
         kind: 'stalled',
         why: `最后一条是你的指令，${humanAge(ageMin)}没人回`,
-        next: '确认是否在跑：minimax_read_session {session:"' + s.session_id + '", limit:2}',
-        suggestedCall: { tool: 'minimax_read_session', arguments: { session: s.session_id, limit: 2 } },
+        next: '确认近期进度',
+        suggestedCall: { tool: 'minimax_session', arguments: { sessionId: s.session_id, limit: 2 } },
       });
       continue;
     }
@@ -214,8 +218,8 @@ function brief(opts = {}) {
         priority: 4,
         kind: 'active',
         why: s.status === 'started' ? '状态是 started（这轮还没结束）' : `${humanAge(ageMin)}还有新消息`,
-        next: '获取最新产出：minimax_get_result {sessionId:"' + s.session_id + '"}',
-        suggestedCall: { tool: 'minimax_get_result', arguments: { sessionId: s.session_id } },
+        next: '查看当前轮次',
+        suggestedCall: { tool: 'minimax_agent', arguments: { action: 'result', sessionId: s.session_id } },
       });
       continue;
     }
@@ -227,8 +231,8 @@ function brief(opts = {}) {
         priority: 5,
         kind: 'finished',
         why: `${humanAge(ageMin)}刚收工`,
-        next: '读结论：minimax_read_session {session:"' + s.session_id + '", limit:2}',
-        suggestedCall: { tool: 'minimax_read_session', arguments: { session: s.session_id, limit: 2 } },
+        next: '读取最近的结论',
+        suggestedCall: { tool: 'minimax_session', arguments: { sessionId: s.session_id, limit: 2 } },
       });
     }
     // 其余（安静的旧会话）不输出——这正是 brief 的意义
@@ -251,6 +255,7 @@ function brief(opts = {}) {
     generatedAt: db.localTime(now),
     scannedSessions: total,
     quietSessions: quiet,
+    pendingQuestions: pending.length,
     counts,
     taskFailures,
     items,
@@ -263,6 +268,8 @@ function buildHeadline(counts, quiet, taskFailureCount) {
   const parts = [];
   if (counts.needs_decision) parts.push(`${counts.needs_decision} 个在等你决定`);
   if (counts.error) parts.push(`${counts.error} 个报错`);
+  if (counts.quota_error) parts.push(`${counts.quota_error} 个额度受限`);
+  if (counts.paused_queue) parts.push(`${counts.paused_queue} 个队列暂停`);
   if (counts.stalled) parts.push(`${counts.stalled} 个卡住`);
   if (counts.active) parts.push(`${counts.active} 个在跑`);
   if (counts.finished) parts.push(`${counts.finished} 个刚完成`);

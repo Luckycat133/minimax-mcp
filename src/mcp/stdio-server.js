@@ -8,14 +8,16 @@
 const readline = require('node:readline');
 const { TOOLS } = require('./tools');
 const { SERVER_INFO, PROTOCOL_VERSIONS } = require('./contract');
-const { LEVEL } = require('./annotations');
-const { callTool, setTasksEnabled } = require('./handler');
+const { callTool, isKnownTool, setTasksEnabled } = require('./handler');
 const tasks = require('./tasks');
 
 /** 客户端是否协商了 Tasks 扩展。 */
 let tasksEnabled = false;
 /** 轮询器只能起一个，客户端重复发 initialized 不该叠加定时器。 */
 let pollerStarted = false;
+
+/** 旧 Tasks 草案的 experimental 能力键：客户端须在此键显式选入，服务端回告同一键。 */
+const EXPERIMENTAL_TASKS = 'io.modelcontextprotocol/tasks';
 
 /**
  * 立刻把通知写到 stdout。
@@ -52,18 +54,11 @@ function startTaskPoller() {
     for (const t of tasks.list(50)) {
       if (t.status !== 'working') continue;
       const r = db.checkResult(t.sessionId, t.afterMessageId || 0);
-      if (r.done) {
-        tasks.update(t.taskId, {
-          status: 'completed',
-          statusMessage: 'MiniMax 已跑完',
-          result: r.best.text,
-        });
-        emit('notifications/tasks/status', {
-          taskId: t.taskId,
-          status: 'completed',
-          statusMessage: 'MiniMax 已跑完',
-        });
-      }
+      if (!r.done && !r.aborted) continue;
+      const status = r.aborted ? 'canceled' : 'completed';
+      const statusMessage = r.aborted ? 'MiniMax 轮次已停止' : 'MiniMax 已跑完';
+      tasks.update(t.taskId, { status, statusMessage, result: r.best?.text ?? null });
+      emit('notifications/tasks/status', { taskId: t.taskId, status, statusMessage });
     }
     tasks.prune(72);
   };
@@ -92,7 +87,8 @@ async function handle(message, ctx = CTX) {
   const { id, method, params } = message;
 
   if (method === 'initialize') {
-    tasksEnabled = params?.capabilities?.tasks !== undefined;
+    const legacyTasks = params?.capabilities?.experimental?.[EXPERIMENTAL_TASKS];
+    tasksEnabled = Boolean(legacyTasks && typeof legacyTasks === 'object' && !Array.isArray(legacyTasks));
     setTasksEnabled(tasksEnabled);
     return {
       jsonrpc: '2.0',
@@ -101,7 +97,7 @@ async function handle(message, ctx = CTX) {
         protocolVersion: negotiateProtocol(params?.protocolVersion),
         capabilities: {
           tools: { listChanged: false },
-          ...(tasksEnabled ? { tasks: {} } : {}),
+          ...(tasksEnabled ? { experimental: { [EXPERIMENTAL_TASKS]: {} } } : {}),
         },
         serverInfo: {
           name: SERVER_INFO.name,
@@ -127,15 +123,14 @@ async function handle(message, ctx = CTX) {
     if (!name) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: '缺少 params.name' } };
     }
-    const known = TOOLS.some((t) => t.name === name) || Object.prototype.hasOwnProperty.call(LEVEL, name);
-    if (!known) {
+    if (!isKnownTool(name)) {
       return { jsonrpc: '2.0', id, error: { code: -32602, message: `未知工具: ${name}` } };
     }
     // 登记在飞请求，这样 notifications/cancelled 能按 id 把它掐掉
     const flag = cancelFlag(id);
     const reqCtx = { ...ctx, shouldStop: () => Boolean(flag && flag.cancelled) };
     try {
-      const result = await callTool(name, params?.arguments || {}, reqCtx);
+      const result = await callTool(name, params?.arguments, reqCtx);
       return { jsonrpc: '2.0', id, result };
     } finally {
       if (id !== undefined && id !== null) inflight.delete(id);
@@ -150,16 +145,16 @@ async function handle(message, ctx = CTX) {
     return null;
   }
 
-  // ---- Tasks 扩展 ----
-  if (method === 'tasks/get') {
+  // ---- 旧 Tasks 草案 ----
+  if (tasksEnabled && method === 'tasks/get') {
     const t = tasks.get(params?.taskId);
     if (!t) return { jsonrpc: '2.0', id, error: { code: -32001, message: `任务不存在: ${params?.taskId}` } };
     return { jsonrpc: '2.0', id, result: t };
   }
-  if (method === 'tasks/list') {
+  if (tasksEnabled && method === 'tasks/list') {
     return { jsonrpc: '2.0', id, result: { tasks: tasks.list(params?.limit || 50) } };
   }
-  if (method === 'tasks/result') {
+  if (tasksEnabled && method === 'tasks/result') {
     const t = tasks.get(params?.taskId);
     if (!t) return { jsonrpc: '2.0', id, error: { code: -32001, message: `任务不存在: ${params?.taskId}` } };
     if (t.status === 'working') {
@@ -174,7 +169,7 @@ async function handle(message, ctx = CTX) {
       },
     };
   }
-  if (method === 'tasks/cancel') {
+  if (tasksEnabled && method === 'tasks/cancel') {
     const t = tasks.cancel(params?.taskId);
     if (!t) return { jsonrpc: '2.0', id, error: { code: -32001, message: `任务不存在: ${params?.taskId}` } };
     return { jsonrpc: '2.0', id, result: t };

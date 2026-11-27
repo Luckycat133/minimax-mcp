@@ -247,7 +247,7 @@ function payload(res) {
     assert.ok(/不能为空/.test(payload(res).error));
   });
 
-  await checkAsync('卡住的会话会走自动催促，且发的是 send+force', async () => {
+  await checkAsync('卡住的会话会走自动催促，并保留发送活跃守卫', async () => {
     const watch = require(path.join(ROOT, 'src/gateway/watch'));
     const sid = db.listSessions(1)[0]?.sessionId;
     assert.ok(sid, '需要一个真实会话 id');
@@ -282,8 +282,9 @@ function payload(res) {
     });
     assert.strictEqual(calls.length, 1, '应该只执行一个动作');
     assert.strictEqual(calls[0].tool, 'minimax_send_message');
+    assert.strictEqual(calls[0].args.sessionId, sid);
     assert.strictEqual(calls[0].args.send, true);
-    assert.strictEqual(calls[0].args.force, true, '自动催促要绕过活跃守卫，但必须先过 idle 判定');
+    assert.notStrictEqual(calls[0].args.force, true, '发送前仍需检查近期活动');
     assert.ok(real.actions.some((a) => a.ok === true));
   });
 

@@ -1,123 +1,112 @@
 'use strict';
 
-/**
- * tools.js — MiniMax MCP 核心工具定义（领域驱动极简 5 工具版）。
- *
- * 遵循 MCP 2024-11-05 规范：
- * 外部 AI 仅需感知 5 项核心能力：
- * 1. minimax_status: 查看 MiniMax 运行状态、CDP 连接、额度刷新倒计时与注意力概况。
- * 2. minimax_session: 查找与探索对话历史（先找会话/查历史）。
- * 3. minimax_agent: 与原生工作区智能体对话（下发任务/自动切会话/获取产出/终止/新建）。
- * 4. minimax_bot: 与 MiniMax Bot 团队对话（名册流水线架构/向指定专家或群聊发指令/读回复）。
- * 5. minimax_questionnaire: 人工决策卡片与审批管理（查看待办/草稿方案/提交答案）。
- *
- * 注：断点自动续传(auto_resume)、周期巡检守护(watch)、桌面管理等完全由网关后台代码全自动静默执行，
- * 不暴露给外部 AI，彻底降低调用上下文 Token 开销并杜绝误调用。
- */
-
 const TOOLS = [
   {
     name: 'minimax_status',
-    description: '查看 MiniMax 运行状态、CDP 9223 端口、Token Plan 额度与刷新倒计时、待审批问卷卡片与注意力队列。',
+    description: '查看 MiniMax 连接、Token Plan 额度和待处理会话。',
     inputSchema: {
       type: 'object',
       properties: {
-        includeBrief: { type: 'boolean', default: true, description: '是否包含注意力队列摘要' },
+        includeBrief: { type: 'boolean', default: true, description: '包含待办摘要' },
       },
       additionalProperties: false,
     },
   },
   {
     name: 'minimax_session',
-    description: '原生会话统一管理与探索：支持会话列表查询(list)、指定会话详情与历史翻页精读(read)、多会话末尾采样(tail)、跨会话全文检索(search)。',
+    description: '列出最近会话、读取历史或搜索标题与正文。',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['list', 'read', 'tail', 'search'],
-          default: 'list',
-          description: '操作类型：list=列出会话, read=精读指定会话历史, tail=多会话末尾采样, search=跨会话全文检索',
+          enum: ['list', 'read', 'search'],
+          description: '省略时按 sessionId、query、list 的顺序推断',
         },
-        session: { type: 'string', description: '会话 ID 或列表序号 (action=read 时使用)' },
-        sessionId: { type: 'string', description: '会话 ID 别名 (同 session)' },
-        limit: { type: 'integer', minimum: 1, maximum: 500, default: 20, description: '返回条数 (action=list/read/search 时使用)' },
-        includeThinking: { type: 'boolean', default: false, description: '是否包含思维链 (action=read 时使用)' },
-        before: { type: 'integer', minimum: 1, description: '消息 ID 翻页锚点 (action=read 时使用)' },
-        query: { type: 'string', description: '全文检索关键词 (action=search 时使用)' },
-        q: { type: 'string', description: '检索关键词别名 (同 query)' },
-        count: { type: 'integer', minimum: 1, maximum: 20, default: 3, description: '采样会话数 (action=tail 时使用)' },
-        perSession: { type: 'integer', minimum: 1, maximum: 20, default: 2, description: '每会话消息数 (action=tail 时使用)' },
+        sessionId: { type: 'string', description: 'read 的会话 ID 或列表序号' },
+        limit: { type: 'integer', minimum: 1, maximum: 500, description: '条数。read 默认 30，采样默认 3，其余默认 20' },
+        includeThinking: { type: 'boolean', default: false, description: 'read 时包含已存储的 thinking 字段' },
+        maxChars: { type: 'integer', minimum: 0, default: 4000, description: 'read/采样每条文本字段的字符上限；0 取全文，截断返回原长度与标记' },
+        before: { type: 'integer', minimum: 1, description: 'read 翻页用上一页的 oldestId' },
+        query: { type: 'string', description: 'search 的关键词' },
+        perSession: { type: 'integer', minimum: 1, maximum: 20, description: 'list 时附带每个会话的末尾消息，最多采样 20 个会话' },
       },
       additionalProperties: false,
     },
   },
   {
     name: 'minimax_agent',
-    description: '主工作区通用智能体调度与执行：支持全自动下发提示词与自动切会话(send)、等待并收取任务产出(result)、终止当前轮次生成(stop)、新建任务视图(new)。外部 Agent 无需接触任何 UI 坐标。',
+    description: '激活 MiniMax 窗口、打开新任务、向原生会话写草稿或发送、查结果或停止轮次。',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['send', 'result', 'stop', 'new'],
-          default: 'send',
-          description: '操作类型：send=发送指令并执行, result=等待并获取结果, stop=终止当前轮次, new=新建任务',
+          enum: ['send', 'result', 'stop', 'new', 'activate'],
+          description: '省略时，有 message 走 send，否则走 result',
         },
-        message: { type: 'string', description: '待发送指令或提示词 (action=send 时必需)' },
-        text: { type: 'string', description: '指令内容别名 (同 message)' },
-        content: { type: 'string', description: '指令内容别名 (同 message)' },
-        sessionId: { type: 'string', description: '目标会话 ID (send 时指定代码自动切会话；result/stop 时指定目标会话)' },
-        session: { type: 'string', description: '目标会话 ID 别名 (同 sessionId)' },
-        newSession: { type: 'boolean', default: false, description: 'true=自动创建并切换至新任务会话 (action=send 时生效)' },
-        send: { type: 'boolean', default: false, description: 'true=触发发送执行, false=仅填入待确认 (action=send 时生效)' },
-        quietSeconds: { type: 'integer', minimum: 0, default: 300, description: '静默保护阈值秒数 (action=send 时生效)' },
-        force: { type: 'boolean', default: false, description: 'true=跳过活跃守卫强制执行 (action=send/stop 时生效)' },
-        preview: { type: 'boolean', default: false, description: 'true=仅预览目标状态不修改 (action=send 时生效)' },
-        at: { type: 'string', description: '可选坐标"x,y"(备用或调试)' },
-        timeoutSeconds: { type: 'integer', minimum: 0, maximum: 300, default: 0, description: '等待超时秒数，0为非阻塞即时返回 (action=result 时使用)' },
-        afterMessageId: { type: 'integer', minimum: 0, description: '消息基线 ID (action=result 时使用)' },
+        message: { type: 'string', description: 'send 所需的消息正文' },
+        sessionId: { type: 'string', description: 'send、result 的目标会话，stop 必填' },
+        newSession: { type: 'boolean', default: false, description: '给新任务写消息，与 sessionId 互斥' },
+        send: { type: 'boolean', default: false, description: 'true 提交消息，默认只填草稿' },
+        force: { type: 'boolean', default: false, description: 'send 时跳过近期活动保护' },
+        preview: { type: 'boolean', default: false, description: '预览 send 的目标与守卫，保留当前会话和草稿' },
+        timeoutSeconds: { type: 'integer', minimum: 0, maximum: 300, default: 0, description: 'result 等待时间，默认即时' },
+        afterMessageId: { type: 'integer', minimum: 0, description: 'send 回执的 messageId；用于 result 查询回复，或 stop 锁定该轮' },
       },
       additionalProperties: false,
     },
   },
   {
     name: 'minimax_bot',
-    description: 'MiniMax Bot 团队全功能协同：查看团队名册与流水线架构(roster)、向指定群聊或专家发送指令(send)、读取对话历史(read)、取消轮次(cancel)、恢复待处理消息(resume)、答复卡片问卷(answer)。支持「剪辑师」「导演」「幸喵剪辑室」等中文别名。',
+    description: '打开 Bot Studio，查看名册、读取群聊或私聊，向明确目标发送、取消、恢复或答卡片。',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['roster', 'send', 'read', 'cancel', 'resume', 'answer'],
-          default: 'roster',
-          description: '操作类型：roster=名册与流水线架构, send=发送指令, read=读取历史消息, cancel=取消轮次, resume=恢复待处理, answer=提交卡片答案',
+          enum: ['roster', 'send', 'read', 'cancel', 'resume', 'answer', 'open'],
+          description: '省略时，text 触发 send，target 触发 read，其余为 roster',
         },
-        target: { type: 'string', description: '目标名称或 ID（如「剪辑师」、「导演」、「幸喵剪辑室」、「bot:bot_...」、「group:grp_...」）' },
-        chatId: { type: 'string', description: '目标会话 ID 别名 (同 target)' },
-        text: { type: 'string', description: '发送的文本指令 (action=send 时必需)' },
-        mode: { type: 'string', enum: ['direct', 'group'], default: 'direct', description: '目标为成员 Bot 时：direct=1对1私聊，group=群聊并自动添加 @Bot名' },
-        limit: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: '读取历史消息数量 (action=read 时使用)' },
-        messageId: { type: 'string', description: '问卷卡片消息 ID (action=answer 时必需)' },
-        answers: { type: 'object', description: '问卷卡片答案键值对 (action=answer 时必需)' },
+        target: { type: 'string', description: 'Bot 或群聊名称，或名册返回的 chatId。写入必填' },
+        text: { type: 'string', maxLength: 50000, description: 'send 的消息正文' },
+        mode: { type: 'string', enum: ['direct', 'group'], default: 'direct', description: '按成员名称发送时，group 在群内 @该成员' },
+        limit: { type: 'integer', minimum: 1, maximum: 100, default: 20, description: 'read 的消息数' },
+        sessionId: { type: 'string', description: 'open 挂载标签页的原生会话，默认使用当前会话' },
+        clientMessageId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$', description: 'send 的去重 ID；同一次发送重试时使用相同 ID 和正文' },
+        messageId: { type: 'string', description: 'answer 的卡片消息 ID' },
+        answers: {
+          type: 'array', minItems: 1, maxItems: 64,
+          description: 'answer 的逐题答案',
+          items: {
+            type: 'object',
+            properties: {
+              stepId: { type: 'string', minLength: 1 },
+              selectedOptionIds: { type: 'array', maxItems: 64, items: { type: 'string', minLength: 1 } },
+              selectedOther: { type: 'boolean' },
+              otherText: { type: 'string', maxLength: 4096 },
+              skipped: { type: 'boolean' },
+            },
+            required: ['stepId', 'selectedOptionIds'],
+            additionalProperties: false,
+          },
+        },
       },
       additionalProperties: false,
     },
   },
   {
     name: 'minimax_questionnaire',
-    description: '人工问卷与审批卡片生命周期管控：列出当前待回答问卷(list)、获取问卷题目与策略推荐草稿(draft)、自动提交选定答案(answer)。代码全自动派发 DOM，外部 Agent 零坐标操作。',
+    description: '列出待处理的原生问卷，查看题目和拟答，或提交确认的答案。',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['list', 'draft', 'answer'],
-          default: 'list',
-          description: '操作类型：list=列出待回答问卷, draft=生成草稿推荐, answer=提交选项回答',
+          enum: ['list', 'answer'],
+          description: '省略时，有 requestId 走 answer 预览，其余列出待办',
         },
-        requestId: { type: 'string', description: '问卷请求 ID (action=draft 或 answer 时必需)' },
-        id: { type: 'string', description: '问卷请求 ID 别名 (同 requestId)' },
+        requestId: { type: 'string', description: 'answer 的问卷请求 ID' },
         selections: {
           type: 'array',
           items: {
@@ -125,13 +114,16 @@ const TOOLS = [
             properties: {
               stepId: { type: 'string' },
               optionIds: { type: 'array', items: { type: 'string' } },
+              selectedOther: { type: 'boolean' },
+              otherText: { type: 'string' },
             },
             required: ['stepId', 'optionIds'],
+            additionalProperties: false,
           },
-          description: '选项配置列表 (action=answer 时使用，不传则使用推荐答案)',
+          description: '选定答案，省略则使用拟答',
         },
-        preview: { type: 'boolean', default: true, description: 'true=仅预览点击方案不修改状态 (action=answer 时生效)' },
-        force: { type: 'boolean', default: false, description: 'true=确认真实提交 (action=answer 时生效)' },
+        preview: { type: 'boolean', default: true, description: '预览选项与拟答' },
+        force: { type: 'boolean', default: false, description: '与 preview:false 一起确认提交' },
       },
       additionalProperties: false,
     },

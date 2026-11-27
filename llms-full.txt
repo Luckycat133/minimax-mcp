@@ -1,49 +1,15 @@
-# minimax-mcp Full Documentation
+# minimax-mcp
 
-> Local-first stdio MCP server and Agent Skill that lets AI agents read and operate MiniMax Code on macOS.
+Local stdio MCP server and Agent Skill for MiniMax Code on macOS. It reads session history, results, and questionnaire state from MiniMax's runtime SQLite database in read-only mode. Targeted native session control uses Chrome DevTools Protocol (CDP). Bot Studio history can fall back to its local archive.
 
-- **Repository**: https://github.com/Luckycat133/minimax-mcp
-- **Author**: Luckycat133
-- **License**: MIT
-- **Protocol**: Model Context Protocol (MCP) JSON-RPC 2.0 stdio
-- **Runtime**: Node.js >= 22 (macOS)
+## Setup
 
----
+Install MiniMax Code, sign in, and make Node.js 22+, Python 3, and SQLite 3 available. In a client such as Claude Desktop or Cursor, configure `mcpServers` with the absolute path to your checkout.
 
-## 1. Architecture Overview
-
-minimax-mcp operates a high-performance dual-plane architecture:
-- **Control Plane (Write)**: Connects via Chrome DevTools Protocol (CDP) port. Microsecond-level DOM & TipTap rich editor automation. Requires 0 macOS accessibility permissions, 0 screen capture permissions, and is immune to window occlusion/minimization. Automatic fallback to CoreGraphics + macOS Vision OCR.
-- **Observation Plane (Read)**: Direct read-only queries against local SQLite runtime state database (`runtime-state.sqlite`). Millisecond-latency task status, questionnaires, and conversation stream monitoring.
-
-```text
-┌────────────────────────────────────────────────────────┐
-│                   Agent Host / Client                  │
-│       (Claude Desktop, Cursor, Antigravity, etc.)      │
-└───────────────────────────┬────────────────────────────┘
-                            │ stdio (JSON-RPC 2.0)
-┌───────────────────────────▼────────────────────────────┐
-│                       minimax-mcp                      │
-│     (27 Tools · 3 Risk Levels · Proactive Watcher)     │
-└───────────┬────────────────────────────────┬───────────┘
-            │                                │
-      [Control Plane]                  [Data Plane]
-            │                                │
- ┌──────────┴──────────┐            ┌────────┴──────────┐
- │ Chrome DevTools     │            │ Local SQLite DB   │
- │ Protocol (CDP)      │            │ Runtime State     │
- └─────────────────────┘            └───────────────────┘
-```
-
----
-
-## 2. Quickstart & MCP Client Configuration
-
-### Claude Desktop (`claude_desktop_config.json`)
 ```json
 {
   "mcpServers": {
-    "minimax": {
+    "minimax-mcp": {
       "command": "node",
       "args": ["/path/to/minimax-mcp/mcp-server.js"]
     }
@@ -51,66 +17,33 @@ minimax-mcp operates a high-performance dual-plane architecture:
 }
 ```
 
-### Cursor (`~/.cursor/mcp.json`)
-```json
-{
-  "mcpServers": {
-    "minimax": {
-      "command": "node",
-      "args": ["/path/to/minimax-mcp/mcp-server.js"]
-    }
-  }
-}
-```
+Run `npm run doctor` from the checkout for local diagnostics. Run `node scripts/launch-with-debug.js` from the same directory to enable CDP if needed. The script restarts MiniMax Code when the port is offline. Check `cdp.online` with `minimax_status`.
 
-### Self-Diagnostics
-```bash
-node scripts/doctor.js
-```
+## Tools
 
----
+| Tool | Actions |
+| --- | --- |
+| `minimax_status` | Read app, database, CDP, and quota state. Set `includeBrief:false` to skip the attention summary. |
+| `minimax_session` | `list`, `read`, or `search`. With no action, `sessionId` selects `read`, `query` selects `search`, and an empty input selects `list`. Add `perSession` to sample messages across listed sessions. |
+| `minimax_agent` | `activate`, `send`, `result`, `stop`, or `new`. An omitted action defaults to `send` when there is a `message` and to `result` otherwise. |
+| `minimax_bot` | `open`, `roster`, `read`, `send`, `cancel`, `resume`, or `answer`. Chat writes require an explicit `target`. |
+| `minimax_questionnaire` | `list` or `answer`. An omitted action selects `answer` with a `requestId` and `list` otherwise. |
 
-## 3. Tool Index (27 Tools Across 3 Risk Levels)
+Session history and sampled messages default to 4000 Unicode characters per text field. Truncated fields report their original length and an explicit truncation flag. For one full message, read the same session with `limit:1`, `before:messageId+1`, and `maxChars:0`, then verify the returned ID. This does not clip the final agent result.
 
-### Read-Only Tools (Zero-Risk)
-- `minimax_brief`: Prioritized situational snapshot of sessions (Waiting Decisions > Errors > Stuck > Running > Finished). Saves 90% prompt tokens.
-- `minimax_status`: Real-time runtime status of MiniMax Code app, SQLite DB path, and CDP connection state.
-- `minimax_list_sessions`: List active and historical conversation sessions with metadata.
-- `minimax_read_session`: Read messages, thinking blocks, and tool outputs from a given session.
-- `minimax_tail_sessions`: Stream recent session events and status changes.
-- `minimax_search`: Full-text search across all conversations and code snippets.
-- `minimax_pending`: Query interactive questionnaires and confirmations awaiting human decision.
-- `minimax_tasks`: Inspect background tasks and generation status.
-- `minimax_windows`: List MiniMax Code window geometry and screen space.
-- `minimax_screenshot`: Capture window screenshot for visual inspection.
-- `minimax_get_result`: Retrieve completed task execution results.
-- `minimax_find_text`: Locate UI element coordinates using macOS Vision OCR.
-- `minimax_events`: Read event audit trail.
+For an existing native conversation, find its `sessionId` with `minimax_session` and use it for targeted actions. To send the first prompt in a new session, use `newSession:true` without a `sessionId`. The default `send:false` fills a draft. Use `preview:true` for a read-only preflight and `send:true` to send. A verified send returns `sent:true`, `verified:true`, and a `messageId`. Use the `messageId` as `afterMessageId` in the result lookup. The default result timeout is zero for an immediate check. A response with `sent:null` means delivery is unconfirmed. Check the conversation before retrying.
 
-### Interactive Tools (Low / Medium Risk)
-- `minimax_draft_answer`: Stage or preview an answer to an interactive confirmation without sending.
-- `minimax_answer_question`: Submit choice or text to an interactive questionnaire.
-- `minimax_send_message`: Send a prompt or reply to a session via CDP/DOM.
-- `minimax_new_task`: Start a new conversation or background coding task.
-- `minimax_open_session`: Switch active workspace to a specific session.
-- `minimax_click`: Simulate mouse click at specific screen or element coordinates.
-- `minimax_type`: Input text into active input field.
-- `minimax_key`: Simulate keyboard keypress or shortcut (e.g. Return, Tab).
-- `minimax_click_text`: OCR-guided text element click.
-- `minimax_bot_message`: Dispatch message to a specific bot in a multi-bot collaboration.
+Native control requires MiniMax Code in the foreground with CDP connected. Use `activate` to focus the window. For `stop`, pass the session ID and optionally the send receipt's `messageId` as `afterMessageId` to bind that turn. `stopped:true` follows database confirmation that the turn is aborted.
 
-### Management & Control Tools (Controlled Risk)
-- `minimax_activate`: Bring MiniMax Code window to foreground.
-- `minimax_stop_generation`: Abort currently running generation or build.
-- `minimax_watch`: Configure proactive background watcher policy (frequency, auto-nudge, mode).
-- `minimax_auto_resume`: Automatically resume stuck sessions based on policy rules.
+A questionnaire answer call previews the questions and suggestion by default. To preview different choices, pass `selections`. To submit, open the matching card in MiniMax Code and pass `preview:false` and `force:true`. For a Bot card, pass the target chat, the card's `messageId`, and an `answers` array with `stepId` and `selectedOptionIds` per step. Check the history for the resulting answer.
 
----
+CDP status and any known quota reset time are reported by `minimax_status`. After a quota reset, resume the task explicitly if needed. Use the Bot action `open` to start Bot Studio and check `source:"live"`. For a retry of the same Bot send, reuse the target, text and `clientMessageId`. The Bot action `resume` operates on held messages in the specified chat.
 
-## 4. Frequently Asked Questions (FAQ)
+## Verification and references
 
-### Q: Does minimax-mcp require macOS Accessibility or Screen Recording permissions?
-In CDP mode, zero macOS Accessibility or Screen Recording permissions are needed. It interacts directly with the DOM and TipTap editor over Chrome DevTools Protocol. CoreGraphics/OCR is only used as a fallback.
+Run `node tests/smoke.test.js` from the checkout to exercise the stdio server on a Mac with MiniMax Code. Run `node scripts/test-all-tools-benchmark.js` for read-only MCP call timing.
 
-### Q: How does it preserve prompt tokens?
-`minimax_brief` collapses hundreds of idle historical conversations and only surfaces sessions needing attention (e.g., waiting for human decision or errored), reducing token consumption by up to 90%.
+- [README and setup](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/README.md)
+- [Agent Skill](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/skills/minimax-mcp/SKILL.md)
+- [Detailed tool reference](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/skills/minimax-mcp/references/mcp-surface.md)
+- [JSON-RPC examples](https://raw.githubusercontent.com/Luckycat133/minimax-mcp/main/skills/minimax-mcp/references/mcp-call-examples.json)

@@ -51,15 +51,15 @@ const LEVEL = {
  */
 const GATES = {
   minimax_agent: 'send 默认 false；另有活跃守卫，最近 300s 内有会话活动就拒绝；action=result 时只读',
-  minimax_bot: 'action=roster/read 时只读；action=send 时需显式提供 text 内容；action=answer 时需提交具体答案',
-  minimax_questionnaire: 'action=list/draft 时只读；action=answer 时 preview 默认 true，真实提交需 preview:false + force:true',
+  minimax_bot: 'roster/read 时只读；send/cancel/resume/answer 需明确 target；action=send 时还需显式提供 text 内容；action=answer 时需提交具体答案',
+  minimax_questionnaire: 'action=list 时只读；action=answer 时 preview 默认 true，真实提交需 preview:false + force:true',
   minimax_watch: 'mode 默认 act 但只动低风险：仅当风险=low 且有推荐答案、人离开 ≥minIdleSeconds、每轮最多 maxActionsPerTick 个动作',
 
   // 兼容别名闸门
   minimax_send_message: 'send 默认 false；另有活跃守卫，最近 300s 内有会话活动就拒绝',
   minimax_answer_question: 'preview 默认 true；真提交要 preview:false + force:true',
-  minimax_bot_message: 'action=read 时只读；action=send 时需显式提供 text 内容',
-  minimax_bot_turn: 'action=cancel/resume_pending/answer 需指定具体操作及参数',
+  minimax_bot_message: 'action=read 时只读；action=send 时需明确 target 并显式提供 text 内容',
+  minimax_bot_turn: 'action=cancel/resume_pending/answer 需明确 target 并指定具体操作及参数',
 };
 
 /** 幂等：重复调用结果一样，宿主可以安全重试。 */
@@ -69,7 +69,6 @@ const IDEMPOTENT = new Set([
   'minimax_session',
   'minimax_events',
   'minimax_tasks',
-  'minimax_desktop',
   // 别名
   'minimax_list_sessions',
   'minimax_read_session',
@@ -78,8 +77,6 @@ const IDEMPOTENT = new Set([
   'minimax_pending',
   'minimax_draft_answer',
   'minimax_windows',
-  'minimax_screenshot',
-  'minimax_activate',
   'minimax_bot_roster',
 ]);
 

@@ -9,10 +9,11 @@
  */
 
 const { execFileSync } = require('node:child_process');
+const { setTimeout: delay } = require('node:timers/promises');
 const os = require('node:os');
 const path = require('node:path');
 
-const DB_PATH = path.join(os.homedir(), '.minimax/v2/sqlite/runtime-state.sqlite');
+const DB_PATH = process.env.MINIMAX_DB_PATH || path.join(os.homedir(), '.minimax/v2/sqlite/runtime-state.sqlite');
 const SQLITE_BIN = process.env.MINIMAX_SQLITE_BIN || 'sqlite3';
 
 function dbExists() {
@@ -79,7 +80,7 @@ function query(sql, params = []) {
     throw new Error(`找不到 MiniMax 数据库: ${DB_PATH}`);
   }
   const inlined = inlineParams(sql, params);
-  const out = execFileSync(SQLITE_BIN, ['-json', DB_PATH, inlined], {
+  const out = execFileSync(SQLITE_BIN, ['-readonly', '-json', DB_PATH, inlined], {
     encoding: 'utf8',
     timeout: 15000,
     maxBuffer: 32 * 1024 * 1024,
@@ -99,29 +100,11 @@ function one(sql, params = []) {
   return rows[0] || null;
 }
 
-/** 执行一条无返回写操作（慎用，仅用于应急解冻/清理锁）。 */
-function execute(sql, params = []) {
-  if (!dbExists()) {
-    throw new Error(`找不到 MiniMax 数据库: ${DB_PATH}`);
-  }
-  const inlined = inlineParams(sql, params);
-  execFileSync(SQLITE_BIN, [DB_PATH, inlined], {
-    encoding: 'utf8',
-    timeout: 15000,
-  });
-  return { ok: true };
-}
-
 const localTime = (ms) => {
   if (!ms) return null;
   const d = new Date(Number(ms));
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-};
-
-const sleep = (ms) => {
-  const end = Date.now() + ms;
-  while (Date.now() < end) { /* 同步等待 */ }
 };
 
 const clip = (s, n = 90) => {
@@ -181,52 +164,77 @@ function status() {
 
 function listSessions(limit = 20) {
   const rows = query(
-    "select session_id, count(*) as messages, " +
-    "datetime(max(created_at_ms)/1000,'unixepoch','localtime') as lastActivity, " +
-    "max(created_at_ms) as lastActivityMs " +
-    "from local_runtime_message_rows group by session_id " +
-    "order by max(created_at_ms) desc limit ?",
+    "with recent as (select session_id, count(*) as messages, max(created_at_ms) as lastActivityMs " +
+    "from local_runtime_message_rows group by session_id order by lastActivityMs desc, session_id limit ?) " +
+    "select recent.*, datetime(lastActivityMs/1000,'unixepoch','localtime') as lastActivity, " +
+    "(select json_extract(data_json,'$.msg_content') from local_runtime_message_rows " +
+    "where session_id = recent.session_id and role = 'user' order by id limit 1) as firstUserMessage " +
+    "from recent order by lastActivityMs desc, session_id",
     [limit]
   );
-  return rows.map((r, i) => {
-    const first = one(
-      "select json_extract(data_json,'$.msg_content') as c " +
-      "from local_runtime_message_rows where session_id=? and role='user' order by id limit 1",
-      [r.session_id]
-    );
-    return {
-      index: i + 1,
-      sessionId: r.session_id,
-      messages: Number(r.messages),
-      lastActivity: r.lastActivity,
-      lastActivityMs: Number(r.lastActivityMs),
-      firstUserMessage: clip(first?.c, 90),
-    };
-  });
+  return rows.map((r, i) => ({
+    index: i + 1,
+    sessionId: r.session_id,
+    messages: Number(r.messages),
+    lastActivity: r.lastActivity,
+    lastActivityMs: Number(r.lastActivityMs),
+    firstUserMessage: clip(r.firstUserMessage, 90),
+  }));
 }
 
 function resolveSession(arg) {
   if (arg === undefined || arg === null || arg === '') return null;
-  const asString = String(arg);
+  const asString = String(arg).trim();
+  if (!asString) return null;
   if (/^\d+$/.test(asString)) {
     const idx = Number(asString);
-    const list = listSessions(Math.max(idx, 1));
-    return list[idx - 1]?.sessionId || null;
+    if (idx < 1 || idx > 500) return null;
+    return listSessions(idx)[idx - 1]?.sessionId || null;
   }
-  const row = one(
-    "select session_id from local_runtime_message_rows where session_id like ? limit 1",
-    [`${asString}%`]
+  const exact = one(
+    "select session_id from local_runtime_sessions where session_id = ? " +
+    "union select session_id from local_runtime_message_rows where session_id = ? limit 1",
+    [asString, asString]
   );
-  return row?.session_id || null;
+  if (exact) return exact.session_id;
+  const matches = query(
+    "select session_id from local_runtime_sessions where session_id like ? escape '\\' " +
+    "union select session_id from local_runtime_message_rows where session_id like ? escape '\\' limit 2",
+    [`${escapeLike(asString)}%`, `${escapeLike(asString)}%`]
+  );
+  return matches.length === 1 ? matches[0].session_id : null;
 }
+
+const escapeLike = (value) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /**
  * 读一个会话的消息。默认取最后 limit 条（最新在最前返回时已 reverse 成时间顺序）。
  * before 传消息 id 可以继续往前翻——一个会话可能有上万条，只给 limit 就没法回溯。
  */
-function readSession(sessionArg, limit = 30, includeThinking = false, before = null) {
+function readSession(sessionArg, limit = 30, includeThinking = false, before = null, maxChars = 0) {
   const sid = resolveSession(sessionArg);
-  if (!sid) return { error: `找不到会话: ${sessionArg}` };
+  if (!sid) return { error: `找不到会话或前缀不唯一: ${sessionArg}。请使用完整 sessionId` };
+  return readSessionMessages(sid, limit, includeThinking, before, maxChars);
+}
+
+// Internal consumers retain full messages. MCP supplies its explicit preview budget.
+// Count Unicode code points so a preview never splits an emoji surrogate pair.
+function limitMessageText(message, field, maxChars) {
+  const text = message[field];
+  if (!maxChars || typeof text !== 'string' || text.length <= maxChars) return;
+  let chars = 0;
+  let end = 0;
+  for (const char of text) {
+    chars += 1;
+    if (chars <= maxChars) end += char.length;
+  }
+  if (chars <= maxChars) return;
+  message[field] = text.slice(0, end);
+  message[field + 'Chars'] = chars;
+  message[field + 'Truncated'] = true;
+}
+
+function readSessionMessages(sid, limit, includeThinking = false, before = null, maxChars = 0) {
   const useBefore = Number.isFinite(Number(before)) && Number(before) > 0;
   const rows = query(
     "select id, role, created_at_ms, " +
@@ -236,8 +244,10 @@ function readSession(sessionArg, limit = 30, includeThinking = false, before = n
     "from local_runtime_message_rows where session_id=? " +
     (useBefore ? 'and id < ? ' : '') +
     "order by id desc limit ?",
-    useBefore ? [sid, Number(before), limit] : [sid, limit]
+    useBefore ? [sid, Number(before), limit + 1] : [sid, limit + 1]
   );
+  const hasMore = rows.length > limit;
+  if (hasMore) rows.pop();
   const messages = rows.reverse().map((r) => {
     const m = {
       id: Number(r.id),
@@ -252,6 +262,8 @@ function readSession(sessionArg, limit = 30, includeThinking = false, before = n
       } catch { /* 忽略解析失败 */ }
     }
     if (includeThinking && r.thinking) m.thinking = r.thinking;
+    limitMessageText(m, 'content', maxChars);
+    limitMessageText(m, 'thinking', maxChars);
     return m;
   });
   return {
@@ -259,16 +271,16 @@ function readSession(sessionArg, limit = 30, includeThinking = false, before = n
     returned: messages.length,
     // 给调用方一个继续往前翻的锚点；没有更早的消息就是 null
     oldestId: messages.length ? messages[0].id : null,
-    hasMore: messages.length === limit,
+    hasMore,
     messages,
   };
 }
 
-function tailSessions(count = 3, perSession = 2) {
-  return listSessions(count).map((s) => {
-    const r = readSession(s.sessionId, perSession);
-    return { ...s, latest: r.messages || [] };
-  });
+function tailSessions(count = 3, perSession = 2, maxChars = 0) {
+  return listSessions(count).map((s) => ({
+    ...s,
+    latest: readSessionMessages(s.sessionId, perSession, false, null, maxChars).messages,
+  }));
 }
 
 /**
@@ -283,8 +295,7 @@ function search(queryText, limit = 20, includeTitles = true) {
   // 空关键词会退化成 LIKE '%%'，把最近 20 条全捞出来冒充"搜索结果"——静默给错答案。
   if (!q) throw new Error('搜索关键词不能为空');
   // LIKE 里 % 和 _ 是通配符，用户搜这两个字符时会被当成模式，得转义
-  const escaped = q.replace(/[\\%_]/g, (c) => `\\${c}`);
-  const pattern = `%${escaped}%`;
+  const pattern = `%${escapeLike(q)}%`;
 
   const hits = [];
   if (includeTitles) {
@@ -306,13 +317,15 @@ function search(queryText, limit = 20, includeTitles = true) {
     }
   }
 
+  const remaining = limit - hits.length;
+  if (!remaining) return hits;
   const rows = query(
     "select session_id, role, created_at_ms, " +
     "json_extract(data_json,'$.msg_content') as content " +
     "from local_runtime_message_rows " +
     "where json_extract(data_json,'$.msg_content') like ? escape '\\' " +
     "order by id desc limit ?",
-    [pattern, limit]
+    [pattern, remaining]
   );
   for (const r of rows) {
     hits.push({
@@ -425,36 +438,98 @@ function sessionMeta(sessionId) {
   };
 }
 
-/**
- * 等一个会话把当前这轮跑完，返回最终的助手回复。
- * 判定"跑完"用两个信号：会话状态回到 idle，且最后一条 assistant 消息有正文。
- * 这比数消息条数可靠——流式输出过程中会不断追加空 content 的工具调用消息。
- */
-/**
- * 单次检查：这个会话跑完了吗？
- * 不睡眠、不重试，给轮询器用——轮询器自己控制节奏，
- * 传 interval=0 进 waitForResult 会变成 1 秒空转，白烧 CPU。
- */
-function checkResult(sessionId, afterMessageId) {
-  const row = one('select status from local_runtime_sessions where session_id = ?', [sessionId]);
-  const status = row?.status || null;
-  const msg = one(
-    "select id, role, created_at_ms, json_extract(data_json,'$.msg_content') as content "
-    + "from local_runtime_message_rows where session_id = ? and id > ? order by id desc limit 1",
-    [sessionId, afterMessageId]
-  );
-  let best = null;
-  let lastSeen = afterMessageId;
-  if (msg) {
-    lastSeen = Number(msg.id);
-    const text = (msg.content || '').trim();
-    if (msg.role === 'assistant' && text) best = { id: Number(msg.id), text };
+let hasTurnReceipts = false;
+
+function supportsTurnReceipts() {
+  if (!hasTurnReceipts) {
+    const schema = one(`
+      select exists(select 1 from sqlite_master where name = 'local_runtime_turn_ingress')
+        and exists(select 1 from pragma_table_info('local_runtime_message_rows') where name = 'turn_id') as supported
+    `);
+    hasTurnReceipts = Boolean(schema?.supported);
   }
+  return hasTurnReceipts;
+}
+
+function activeTurn(sessionId) {
+  if (!supportsTurnReceipts() || !one("select 1 from sqlite_master where name = 'local_runtime_session_locks'")) {
+    throw new Error('当前 MiniMax 数据库不支持按轮次核对停止结果');
+  }
+  return one(`
+    select t.turn_id as turnId from local_runtime_turn_ingress t
+    join local_runtime_session_locks l on l.session_id = t.session_id
+    where t.session_id = ? and t.status = 'accepted'
+      and l.owner_kind = 'turn' and l.expires_at_ms > ?
+    order by t.accepted_sequence desc limit 1
+  `, [sessionId, Date.now()]);
+}
+
+function turnOutcome(sessionId, turnId) {
+  return one(`
+    select status, completed_at_ms as completedAtMs from local_runtime_turn_ingress
+    where session_id = ? and turn_id = ?
+  `, [sessionId, turnId]);
+}
+
+function turnForMessage(sessionId, messageId) {
+  return one(`
+    select t.turn_id as turnId, t.status from local_runtime_message_rows m
+    join local_runtime_turn_ingress t on t.session_id = m.session_id and t.turn_id = m.turn_id
+    where m.session_id = ? and m.id = ? and m.role = 'user'
+  `, [sessionId, messageId]);
+}
+
+/** 单次检查，不在轮询器内等待。 */
+function checkResult(sessionId, afterMessageId) {
+  const turnStatus = afterMessageId > 0 && supportsTurnReceipts() ? `(
+    select i.status from local_runtime_message_rows m
+    join local_runtime_turn_ingress i on m.session_id = i.session_id and m.turn_id = i.turn_id
+    where m.session_id = t.session_id and m.id = t.after_id and m.role = 'user'
+  )` : 'null';
+  // Keep the message and status reads in the same SQLite snapshot.
+  const state = one(`
+    with target(session_id, after_id) as (values (?, ?)),
+    next_turn as (
+      select m.id from local_runtime_message_rows m, target t
+      where t.after_id > 0 and m.session_id = t.session_id and m.role = 'user' and m.id > t.after_id
+      order by m.id limit 1
+    ),
+    latest as (
+      select m.id from local_runtime_message_rows m, target t
+      where m.session_id = t.session_id and m.id > t.after_id
+        and m.id < coalesce((select id from next_turn), 9223372036854775807)
+      order by m.id desc limit 1
+    ),
+    reply as (
+      select m.id, json_extract(m.data_json,'$.msg_content') as text
+      from local_runtime_message_rows m, target t
+      where m.session_id = t.session_id and m.role = 'assistant' and m.id <= (select id from latest)
+        and m.id > max(t.after_id, coalesce((
+          select max(u.id) from local_runtime_message_rows u
+          where u.session_id = t.session_id and u.role = 'user' and u.id <= (select id from latest)
+        ), 0))
+        and trim(coalesce(json_extract(m.data_json,'$.msg_content'), '')) <> ''
+      order by m.id desc limit 1
+    )
+    select s.status, s.error_message, ${turnStatus} as turnStatus,
+      (select id from latest) as lastSeen,
+      (select id from next_turn) as nextTurn,
+      (select id from reply) as replyId,
+      (select text from reply) as replyText
+    from target t left join local_runtime_sessions s on s.session_id = t.session_id
+  `, [sessionId, afterMessageId]);
+  const text = String(state.replyText ?? '').trim();
+  const best = text ? { id: Number(state.replyId), text } : null;
+  const { nextTurn } = state;
+  const aborted = state.turnStatus === 'aborted' || (state.status === 'aborted' && !nextTurn && !state.turnStatus);
   return {
-    status,
-    lastSeen,
+    status: aborted ? 'aborted' : state.status,
+    aborted,
+    error: state.status === 'error' && !nextTurn ? state.error_message : null,
+    lastSeen: state.lastSeen ?? afterMessageId,
     best,
-    done: status === 'idle' && Boolean(best),
+    superseded: !aborted && Boolean(nextTurn && !best),
+    done: !aborted && (state.status === 'idle' || Boolean(nextTurn)) && Boolean(best),
   };
 }
 
@@ -467,71 +542,31 @@ function checkResult(sessionId, afterMessageId) {
 async function waitForResult(sessionId, afterMessageId, timeoutSeconds = 300, intervalMs = 3000, shouldStop = null) {
   const started = Date.now();
   const deadline = started + timeoutSeconds * 1000;
-  let lastSeen = afterMessageId;
-  let best = null;
-
-  // 1. 优先即时探测：如果本来就已经 idle 且有产出，直接 0ms 返回，避免多余轮询
-  const initial = checkResult(sessionId, afterMessageId);
-  if (initial.done) {
-    return {
-      done: true,
-      sessionId,
-      waitedAt: localTime(Date.now()),
-      waitedSeconds: 0,
-      lastAssistantMessageId: initial.best ? initial.best.id : null,
-      result: initial.best ? initial.best.text : null,
-    };
+  // 同一条回复可能先入库，稍后会话才变为 idle。每次都从本轮的基线检查。
+  let state = checkResult(sessionId, afterMessageId);
+  while (!state.done && !state.superseded && !state.aborted && state.status !== 'error' && Date.now() < deadline && !shouldStop?.()) {
+    await delay(Math.max(0, Math.min(intervalMs, deadline - Date.now())));
+    if (shouldStop?.()) break;
+    state = checkResult(sessionId, afterMessageId);
   }
-
-  // 2. 如果指定了非阻塞即时返回 (timeoutSeconds <= 0)，立刻反馈当前状态
-  if (timeoutSeconds <= 0) {
-    return {
-      done: false,
-      sessionId,
-      waitedSeconds: 0,
-      lastAssistantMessageId: initial.best ? initial.best.id : null,
-      result: initial.best ? initial.best.text : null,
-      status: initial.status,
-      note: '会话当前正在执行中（非阻塞即时返回）',
-    };
-  }
-
-  while (Date.now() < deadline) {
-    if (typeof shouldStop === 'function' && shouldStop()) {
-      return {
-        done: false,
-        cancelled: true,
-        sessionId,
-        waitedSeconds: Math.round((Date.now() - started) / 1000),
-        lastAssistantMessageId: best ? best.id : null,
-        result: best ? best.text : null,
-        note: '客户端取消了这次等待',
-      };
-    }
-    const c = checkResult(sessionId, lastSeen);
-    if (c.lastSeen !== lastSeen) lastSeen = c.lastSeen;
-    if (c.best) best = c.best;
-
-    if (c.done) {
-      return {
-        done: true,
-        sessionId,
-        waitedAt: localTime(Date.now()),
-        waitedSeconds: Math.round((Date.now() - started) / 1000),
-        lastAssistantMessageId: best.id,
-        result: best.text,
-      };
-    }
-    await new Promise((resolve) => { setTimeout(resolve, intervalMs); });
-  }
-
+  const cancelled = shouldStop?.() === true;
+  const done = state.done && !cancelled;
+  const note = cancelled ? '客户端已取消等待'
+    : state.superseded ? '会话已进入下一轮，本轮没有可确认的助手回复'
+      : state.aborted ? '轮次已停止'
+        : state.status === 'error' ? '会话执行失败'
+          : state.status === 'idle' ? '当前轮次还没有可返回的助手回复'
+            : '当前轮次还未完成';
   return {
-    done: false,
+    done,
     sessionId,
     waitedSeconds: Math.round((Date.now() - started) / 1000),
-    lastAssistantMessageId: best ? best.id : null,
-    result: best ? best.text : null,
-    note: '超时了还没回到 idle；结果可能是半成品',
+    lastAssistantMessageId: state.best?.id ?? null,
+    result: state.best?.text ?? null,
+    status: state.status,
+    ...(done ? { waitedAt: localTime(Date.now()) } : { note }),
+    ...(cancelled ? { cancelled } : {}),
+    ...(state.error ? { error: state.error } : {}),
   };
 }
 
@@ -586,9 +621,10 @@ function suggestAnswer(detail) {
   if (!detail) return null;
   const answers = detail.steps.map((s) => {
     const picked = s.options.filter((o) => o.recommended).map((o) => o.optionId);
-    const fallback = picked.length ? picked : (s.options[0] ? [s.options[0].optionId] : []);
+    let fallback = picked.length ? picked : (s.options[0] ? [s.options[0].optionId] : []);
+    if (s.selectionMode === 'single') fallback = fallback.slice(0, 1);
     return { stepId: s.stepId, selectedOptionIds: fallback, selectedOther: false };
-  });
+  }).filter((answer, index) => answer.selectedOptionIds.length || detail.steps[index].required !== false);
   return {
     basis: '取每步 recommended 标记的选项；没有标记就取第一个',
     answers,
@@ -606,22 +642,26 @@ function maxMessageId() {
   return Number(row?.m || 0);
 }
 
-/** 轮询数据库，确认以 prefix 开头的新用户消息已入库。 */
-function waitForUserMessage(afterId, prefix, tries = 16, intervalMs = 500) {
-  const needle = String(prefix || '').slice(0, 12).trim();
+/** 在本次提交的基线之后核对完整正文和目标会话。 */
+async function waitForUserMessage(afterId, message, { sessionId, newSession, tries = 16, intervalMs = 500 } = {}) {
+  const normalize = (value) => String(value ?? '').replace(/\r\n?/g, '\n').trim();
+  const needle = normalize(message);
   for (let i = 0; i < tries; i += 1) {
-    const row = one(
+    const rows = query(
       "select id, session_id, json_extract(data_json,'$.msg_content') as content " +
-      "from local_runtime_message_rows where role='user' and id > ? order by id desc limit 1",
-      [afterId]
+      "from local_runtime_message_rows where role='user' and id > ? " +
+      (sessionId ? 'and session_id = ? ' : '') +
+      (newSession ? 'and not exists (select 1 from local_runtime_message_rows older ' +
+        'where older.session_id = local_runtime_message_rows.session_id and older.id <= ?) ' : '') +
+      'order by id',
+      [afterId, ...(sessionId ? [sessionId] : []), ...(newSession ? [afterId] : [])]
     );
-    if (row && String(row.content || '').trim().startsWith(needle)) {
-      return { ok: true, messageId: Number(row.id), sessionId: row.session_id };
+    const hits = rows.filter((row) => normalize(row.content) === needle);
+    if (hits.length === 1) {
+      return { ok: true, messageId: Number(hits[0].id), sessionId: hits[0].session_id };
     }
-    if (i < tries - 1) {
-      const end = Date.now() + intervalMs;
-      while (Date.now() < end) { /* 同步 sleep */ }
-    }
+    if (hits.length > 1) break;
+    if (i < tries - 1) await delay(intervalMs);
   }
   return { ok: false };
 }
@@ -630,7 +670,6 @@ module.exports = {
   DB_PATH,
   dbExists,
   query,
-  execute,
   status,
   listSessions,
   recentlyTouchedSessions,
@@ -645,6 +684,9 @@ module.exports = {
   tasks,
   maxMessageId,
   waitForUserMessage,
+  activeTurn,
+  turnOutcome,
+  turnForMessage,
   waitForResult,
   checkResult,
   localTime,

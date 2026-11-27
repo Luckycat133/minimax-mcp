@@ -77,17 +77,17 @@ function checkValue(schema, value, path, errors) {
   // 对象
   if (TYPE_CHECKS.object(value) && schema.properties) {
     for (const key of schema.required || []) {
-      if (value[key] === undefined) errors.push(`缺少必填参数 ${path ? `${path}.` : ''}${key}`);
+      if (!Object.hasOwn(value, key) || value[key] === undefined) errors.push(`缺少必填参数 ${path ? `${path}.` : ''}${key}`);
     }
     if (schema.additionalProperties === false) {
       for (const key of Object.keys(value)) {
-        if (!schema.properties[key]) {
+        if (!Object.hasOwn(schema.properties, key)) {
           errors.push(`${path ? `${path}.` : ''}${key} 不是这个工具支持的参数（支持：${Object.keys(schema.properties).join(', ')}）`);
         }
       }
     }
     for (const [key, sub] of Object.entries(schema.properties)) {
-      if (value[key] === undefined) continue;
+      if (!Object.hasOwn(value, key) || value[key] === undefined) continue;
       checkValue(sub, value[key], path ? `${path}.${key}` : key, errors);
     }
   }

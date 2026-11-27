@@ -8,75 +8,75 @@
   "tools": [
     {
       "name": "minimax_status",
-      "intent": "查看 MiniMax 运行状态、CDP 9223 端口、Token Plan 额度与刷新倒计时、待审批问卷卡片与注意力队列。",
+      "intent": "查看应用、数据库、CDP、额度和待处理事项。",
       "input": {
-        "includeBrief": "boolean, 默认 true, 是否包含注意力队列概况"
+        "includeBrief": "boolean，默认 true，包含注意力摘要"
       },
-      "output": "app{running,pid}, cdp{online,port}, quota{isLimited,refreshAtMs,waitSeconds,countdownText}, attention{headline,pendingQuestions,stalledSessions}, database{path,sessions,messages}",
-      "sideEffects": "none（纯读状态）"
+      "output": "{dbPath, dbFound, app, cdp, quota?, attention?, ...}。quota 可包含 isLimited、resetAtMs、waitSeconds。",
+      "sideEffects": "只读"
     },
     {
       "name": "minimax_session",
-      "intent": "原生会话统一管理与探索：支持会话列表查询(list)、指定会话详情与历史翻页精读(read)、多会话末尾采样(tail)、跨会话全文检索(search)。",
+      "intent": "列出或采样最近会话、读取历史、搜索标题和消息。",
       "input": {
-        "action": "string, enum [list, read, tail, search], 默认 list",
-        "session": "string (action=read 时使用)",
-        "sessionId": "string (同 session)",
-        "limit": "integer, 默认 20",
-        "includeThinking": "boolean, 默认 false",
-        "before": "integer (翻页锚点)",
-        "query": "string (action=search 时使用)",
-        "count": "integer (action=tail 时使用)",
-        "perSession": "integer (action=tail 时使用)"
+        "action": "list | read | search。省略时按 sessionId、query、list 的顺序推断",
+        "sessionId": "string，read 使用的会话 ID",
+        "query": "string，search 使用的关键词",
+        "limit": "integer，read 默认 30，其余默认 20。list 带 perSession 时默认 3、最多 20 个会话",
+        "before": "integer，read 的上一页 oldestId",
+        "includeThinking": "boolean，read 时包含本地记录的思考字段，默认 false",
+        "perSession": "integer，list 时每个会话采样的消息数",
+        "maxChars": "integer，read/采样每条 content/thinking 的 Unicode 字符上限，默认 4000；0 返回全文"
       },
-      "output": "sessions[] (list/tail时) 或 {sessionId, returned, messages[]} (read时) 或 hits[] (search时)",
-      "sideEffects": "none（纯读数据库）"
+      "output": "list 返回 {sessions}。read 返回 {sessionId, returned, oldestId, hasMore, messages}。search 返回 {hits}。 截断字段带 contentChars/contentTruncated 或 thinkingChars/thinkingTruncated；hasMore 仅指更早的消息。",
+      "sideEffects": "只读"
     },
     {
       "name": "minimax_agent",
-      "intent": "主工作区通用智能体调度与执行：支持全自动下发提示词与自动切会话(send)、等待并收取任务产出(result)、终止当前轮次生成(stop)、新建任务视图(new)。代码全自动管理窗口与会话，外部无需接触任何坐标。",
+      "intent": "激活窗口、打开新任务、向原生 MiniMax 会话派发任务、收取结果或停止生成。",
       "input": {
-        "action": "string, enum [send, result, stop, new], 默认 send",
-        "message": "string (action=send 时必需)",
-        "text": "string (别名)",
-        "sessionId": "string (指定切换会话)",
-        "newSession": "boolean, 默认 false (自动新建任务会话)",
-        "send": "boolean, 默认 false (true 触发执行)",
-        "force": "boolean, 默认 false (跳过活跃守卫)",
-        "preview": "boolean, 默认 false (预览执行)",
-        "timeoutSeconds": "integer (action=result 等待超时)",
-        "afterMessageId": "integer (action=result 基线 ID)"
+        "action": "send | result | stop | new | activate。有 message 时默认为 send，其余为 result",
+        "message": "string，send 使用的指令",
+        "sessionId": "string，目标会话 ID",
+        "newSession": "boolean，send 时以新任务为目标，与 sessionId 互斥",
+        "send": "boolean，默认 false 填写草稿，true 实际发送",
+        "preview": "boolean，true 仅预览发送计划",
+        "force": "boolean，true 跳过活跃守卫",
+        "timeoutSeconds": "integer，result 等待时长，默认 0 即时检查，最长 300 秒",
+        "afterMessageId": "integer，传 send 回执的 messageId，result 查询本轮回复，stop 锁定本轮"
       },
-      "output": "send: {sent, via, sessionId, messageId} 或 result: {done, text, files, waitedSeconds}",
-      "sideEffects": "commit（send/stop 操作会改变会话状态，默认 preview=false 且 send=false）"
+      "output": "发送确认时返回 {sent:true, verified:true, sessionId, messageId}。sent:null 表示发送状态未确认。stop 以同一 turnId 的 aborted 确认停止，result 返回该轮的 status、done 和回复。",
+      "sideEffects": "result 和 send 的预览只读。activate 切换焦点。填写草稿、新任务和停止操作改变客户端状态，实际发送需 send:true。"
     },
     {
       "name": "minimax_bot",
-      "intent": "MiniMax Bot 团队全功能协同：查看团队名册与流水线架构(roster)、向指定群聊或专家发送指令(send)、读取对话历史(read)、取消轮次(cancel)、恢复待处理消息(resume)、答复卡片问卷(answer)。支持「剪辑师」「导演」「幸喵剪辑室」等中文别名。",
+      "intent": "打开 Bot Studio、查阅名册、读写对话、控制轮次或回答 Bot 卡片。",
       "input": {
-        "action": "string, enum [roster, send, read, cancel, resume, answer], 默认 roster",
-        "target": "string (目标名称如「剪辑师」或 chatId)",
-        "text": "string (action=send 时必需)",
-        "mode": "string, enum [direct, group], 默认 direct",
-        "limit": "integer, 默认 20 (action=read 时使用)",
-        "messageId": "string (action=answer 时必需)",
-        "answers": "object (action=answer 时必需)"
+        "action": "roster | read | send | cancel | resume | answer | open。有 text 时默认 send，有 target 时默认 read，其余为 roster",
+        "target": "string，群聊或 Bot 名称、ID，写入必填",
+        "text": "string，send 使用的消息",
+        "mode": "direct | group。指定 Bot 时默认为 direct",
+        "limit": "integer，read 返回条数，默认 20",
+        "sessionId": "string，open 新标签页所属的原生会话，默认为当前会话",
+        "clientMessageId": "string，send 的去重 ID，重试沿用原 ID 和正文",
+        "messageId": "string，answer 使用的 Bot 卡片消息 ID",
+        "answers": "array[{stepId, selectedOptionIds, selectedOther?, otherText?, skipped?}]，answer 使用的逐题答案"
       },
-      "output": "roster: {groups, bots, totalBots} 或 send: {target, sent, messageId} 或 read: {target, messages[]}",
-      "sideEffects": "commit（send/cancel/resume/answer 会产生状态变更，roster/read 纯只读）"
+      "output": "roster 返回名册。open 和 read 的 source 表明实时服务是否可用。send 返回 sent、verified 和 clientMessageId。cancel 返回收到停止请求的轮次数 cancelled，通过 read 核对终态。接收前确认取消的兼容记录以 status:aborted 和 cancellation 返回。answer 返回 accepted。",
+      "sideEffects": "roster、read 只读。open 可启动插件并打开标签页。send、cancel、resume、answer 会改变指定 Bot 对话。"
     },
     {
       "name": "minimax_questionnaire",
-      "intent": "人工问卷与审批卡片生命周期管控：列出当前待回答问卷(list)、获取问卷题目与策略推荐草稿(draft)、自动提交选定答案(answer)。代码全自动派发 DOM，外部 Agent 零坐标操作。",
+      "intent": "列出原生待答问卷、预览题目及答案、提交选项。",
       "input": {
-        "action": "string, enum [list, draft, answer], 默认 list",
-        "requestId": "string (action=draft 或 answer 时必需)",
-        "selections": "array[{stepId, optionIds}] (action=answer 时使用)",
-        "preview": "boolean, 默认 true (仅预览方案)",
-        "force": "boolean, 默认 false (确认提交)"
+        "action": "list | answer。有 requestId 时默认为 answer，其余为 list",
+        "requestId": "string，answer 使用的问卷 ID",
+        "selections": "array[{stepId, optionIds, selectedOther?, otherText?}]，可选，提供后预览或提交所选答案",
+        "preview": "boolean，默认 true，仅预览",
+        "force": "boolean，真实提交时传 true"
       },
-      "output": "list: {pending[]} 或 draft: {requestId, steps, suggestion} 或 answer: {preview, wouldSubmit, clickPlan}",
-      "sideEffects": "commit（answer 在 preview=false + force=true 时提交修改，其余操作纯只读）"
+      "output": "list 返回 {pending}。answer 预览返回题目、suggestion 和拟提交答案。提交后查看 verified 和 status。",
+      "sideEffects": "answer 在 preview:false、force:true 时提交答案。其余调用只读。"
     }
   ]
 }

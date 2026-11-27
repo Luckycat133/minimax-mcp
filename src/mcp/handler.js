@@ -1,19 +1,13 @@
 'use strict';
 
-/**
- * handler.js — MCP 请求分发与执行引擎（多层触发 Tiered Action 规范版）。
- *
- * 核心架构：
- * 1. 采用渐进式披露的多层分发机制（minimax_session, minimax_agent, minimax_bot, minimax_questionnaire, minimax_desktop）。
- * 2. 界面操作全由底层代码在 CDP / DOM / SQLite 层面自动闭环执行，外部 Agent 零物理坐标接触。
- * 3. 完整保留对遗留单动作工具名的向下透明兼容。
- */
+/** MCP 参数校验、工具分发、错误转换与审计。 */
 
 const path = require('path');
 const fs = require('fs');
 const db = require('../gateway/db');
 const gui = require('../gateway/gui');
-const ocr = require('../gateway/ocr');
+const agent = require('../gateway/agent');
+const questions = require('../gateway/questions');
 const { cdp } = require('../gateway/cdp');
 const qn = require('./questionnaire');
 const brief = require('../gateway/brief');
@@ -28,61 +22,14 @@ const tasks = require('./tasks');
 let tasksEnabled = false;
 function setTasksEnabled(v) { tasksEnabled = v === true; }
 
-const READONLY = new Set([
-  'minimax_brief', 'minimax_status', 'minimax_session', 'minimax_events', 'minimax_tasks',
-  // 兼容别名
-  'minimax_list_sessions', 'minimax_read_session', 'minimax_tail_sessions', 'minimax_search',
-  'minimax_pending', 'minimax_draft_answer', 'minimax_windows', 'minimax_get_result', 'minimax_bot_roster',
-]);
+const READONLY = new Set(Object.keys(ann.LEVEL).filter((name) => ann.levelOf(name) === 'read'));
 
 function ok(payload) {
-  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: false };
+  return { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: false };
 }
 
-function fail(message) {
-  return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], isError: true };
-}
-
-/**
- * 守卫用的候选会话：合并两个信号——
- *  1. local_runtime_sessions.updated_at_ms 最新的几个（打开/切会话会刷新，最接近"正在看"）
- *  2. 消息活跃度最高的几个（正在跑的会话）
- * 两个信号的并集里，只要有会话在 quietSeconds 内动过就认为"用户正在对话中"。
- * 宁可拦错，不可误发。
- */
-function guardCandidates() {
-  const seen = new Map();
-  for (const s of db.recentlyTouchedSessions(5)) {
-    seen.set(s.sessionId, { ...s, source: 'touched' });
-  }
-  for (const s of db.listSessions(10)) {
-    if (!seen.has(s.sessionId)) {
-      seen.set(s.sessionId, { ...s, source: 'active' });
-    }
-  }
-  return Array.from(seen.values());
-}
-
-/**
- * 点某个坐标前，先看该坐标有没有被 MiniMax 之外的"在屏窗口"盖住。
- */
-function blockedByOverlay(targetX, targetY) {
-  const onScreen = gui.appWindows();
-  for (const w of onScreen) {
-    if (w.app === gui.APP) continue;
-    if (targetX >= w.x && targetX <= w.x + w.width &&
-        targetY >= w.y && targetY <= w.y + w.height) {
-      return w;
-    }
-  }
-  return null;
-}
-
-function parseAt(raw) {
-  if (typeof raw !== 'string') return null;
-  const m = raw.match(/^\s*(\d+)\s*,\s*(\d+)\s*$/);
-  if (!m) return null;
-  return { x: Number(m[1]), y: Number(m[2]), text: `${m[1]},${m[2]}` };
+function fail(message, details = {}) {
+  return { content: [{ type: 'text', text: JSON.stringify({ error: message, ...details }) }], isError: true };
 }
 
 async function dispatch(name, args = {}, ctx = null) {
@@ -114,21 +61,61 @@ async function dispatch(name, args = {}, ctx = null) {
             s.quota = await cdp.getQuotaStatus();
           } catch (_) {}
         } else if (s.app.running) {
-          s.cdp.hint = 'MiniMax 正在运行但未开启 CDP 调试端口 (9223)。可调用 activate 挂载调试端口。';
+          s.cdp.hint = 'MiniMax 正在运行但未开启 CDP 调试端口 (9223)。可用 scripts/launch-with-debug.js 启用。';
         } else {
-          s.cdp.hint = 'MiniMax Code 尚未运行。发送指令时会自动启动。';
+          s.cdp.hint = 'MiniMax Code 尚未运行。';
         }
 
+        let brQuotaErrors = 0;
         if (args.includeBrief !== false) {
           try {
-            const pending = db.pending();
             const br = brief.brief({ limit: 20 });
+            brQuotaErrors = br.counts.quota_error || 0;
             s.attention = {
               headline: br.headline,
-              pendingQuestions: pending.length,
-              stalledSessions: (br.items || []).filter((it) => it.kind === 'stalled').length,
+              pendingQuestions: br.pendingQuestions,
+              stalledSessions: br.counts.stalled || 0,
+              quotaErrorSessions: brQuotaErrors,
             };
           } catch (_) {}
+        }
+
+        const quotaLimited = Boolean(s.quota && s.quota.isLimited);
+        if (quotaLimited) {
+          const rawWait = typeof s.quota.waitSeconds === 'number' ? s.quota.waitSeconds : null;
+          const wakeAfterSeconds = rawWait !== null ? Math.max(30, rawWait + 30) : 600;
+          const wakeAtMs = typeof s.quota.resetAtMs === 'number'
+            ? s.quota.resetAtMs + 30000
+            : Date.now() + wakeAfterSeconds * 1000;
+          s.wakeup = {
+            shouldSchedule: true,
+            reason: 'quota_limited',
+            wakeAfterSeconds,
+            wakeAtMs,
+            wakeAt: db.localTime(wakeAtMs),
+            exact: rawWait !== null,
+            instruction: rawWait !== null
+              ? `不要让用户手动唤醒：请立即给自己设一次性定时唤醒（${wakeAfterSeconds} 秒后，即重置时间 +30 秒缓冲）；醒来后先查 minimax_status 确认 quota.isLimited === false，再续跑任务（Bot 对话用 minimax_bot {action:"resume", target}；原生会话用 minimax_agent 对原 sessionId 续发指令）。`
+              : '已触达额度上限但未解析出重置时间：请给自己设 600 秒一次性定时唤醒复查 minimax_status，不要让用户手动唤醒。',
+          };
+        } else if (!cdpUp && brQuotaErrors > 0) {
+          const wakeAfterSeconds = 600;
+          const wakeAtMs = Date.now() + wakeAfterSeconds * 1000;
+          s.wakeup = {
+            shouldSchedule: true,
+            reason: 'cdp_offline_with_quota_errors',
+            wakeAfterSeconds,
+            wakeAtMs,
+            wakeAt: db.localTime(wakeAtMs),
+            exact: false,
+            instruction: '检测到近期额度受限会话但 CDP 离线，无法读取精确重置时间：请先运行 scripts/launch-with-debug.js 后重查 minimax_status 获取精确 waitSeconds，或先给自己设 600 秒一次性定时唤醒复查；不要让用户手动唤醒。',
+          };
+        } else if (cdpUp && s.quota && !s.quota.isLimited && brQuotaErrors > 0) {
+          s.wakeup = {
+            shouldSchedule: false,
+            reason: 'quota_available',
+            instruction: '当前额度已恢复可用，可直接续跑受限会话（Bot 对话用 minimax_bot {action:"resume", target}；原生会话用 minimax_agent 对原 sessionId 续发指令）。',
+          };
         }
         return ok(s);
       }
@@ -164,221 +151,71 @@ async function dispatch(name, args = {}, ctx = null) {
       case 'minimax_tasks':
         return ok({ tasks: db.tasks(args.limit ?? 20, args.status ?? null) });
 
-      case 'minimax_auto_resume': {
-        const { autoResume } = require('../gateway/resume');
-        const dryRun = args.dryRun !== false;
-        const limit = args.limit || 5;
-        const res = await autoResume({ dryRun, limit, sessionId: args.sessionId });
-        return ok(res);
-      }
-
-      // ---------- 2. 原生会话统一管理 (minimax_session) ----------
       case 'minimax_session': {
-        const action = args.action || 'list';
-        if (action === 'list') {
+        if (args.action === 'list') {
+          if (args.perSession !== undefined) {
+            const limit = args.limit ?? 3;
+            if (limit > 20) return fail('带 perSession 的列表最多采样 20 个会话');
+            return ok({ sessions: db.tailSessions(limit, args.perSession, args.maxChars ?? 4000) });
+          }
           return ok({ sessions: db.listSessions(args.limit ?? 20) });
         }
-        if (action === 'read') {
-          const target = args.session || args.sessionId;
-          if (!target) return fail('action=read 时缺少参数 session 或 sessionId');
-          const r = db.readSession(target, args.limit ?? 30, args.includeThinking === true, args.before ?? null);
+        if (args.action === 'read') {
+          if (!args.sessionId?.trim()) return fail('read 需要 sessionId');
+          const r = db.readSession(args.sessionId, args.limit ?? 30, args.includeThinking, args.before, args.maxChars ?? 4000);
           return r.error ? fail(r.error) : ok(r);
         }
-        if (action === 'tail') {
-          return ok({ sessions: db.tailSessions(args.count ?? 3, args.perSession ?? 2) });
-        }
-        if (action === 'search') {
-          const query = args.query || args.q;
-          if (!query) return fail('action=search 时 query 不能为空');
-          return ok({ hits: db.search(query, args.limit ?? 20, true) });
-        }
-        return fail(`未知会话操作类型: ${action}`);
+        return ok({ hits: db.search(args.query, args.limit ?? 20) });
       }
 
-      // ---------- 3. 原生通用智能体调度 (minimax_agent) ----------
       case 'minimax_agent': {
-        const action = args.action || 'send';
+        if (args.action === 'activate') return ok(await agent.activate(ctx));
+        if (args.action === 'new') return ok(await agent.newTask(ctx));
+        if (args.action === 'stop') return ok(await agent.stop(args, ctx));
 
-        if (action === 'new') {
-          if (await cdp.isAvailable()) {
-            try {
-              const r = await cdp.newTask();
-              return ok({ opened: true, via: r.via || 'cdp', note: '已通过 CDP 快速切换至新建任务页' });
-            } catch (_) {}
-          }
-          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-          gui.pressKey('n', ['cmd']);
-          gui.sleep(1200);
-          return ok({ opened: true, via: 'gui-cmd-n', note: '已发送 ⌘N 新建任务快捷键' });
+        if (args.action === 'result') {
+          const sid = args.sessionId === undefined
+            ? (db.recentlyTouchedSessions(1)[0] || db.listSessions(1)[0])?.sessionId
+            : db.resolveSession(args.sessionId);
+          if (!sid) return fail('找不到会话。请用 minimax_session 获取完整 sessionId');
+          const result = await db.waitForResult(sid, args.afterMessageId ?? 0, args.timeoutSeconds, 3000, ctx?.shouldStop);
+          if (args.sessionId === undefined) result.note = [result.note, '当前显示最近活跃会话'].filter(Boolean).join('。');
+          return ok(result);
         }
 
-        if (action === 'stop') {
-          if (await cdp.isAvailable()) {
-            try {
-              const r = await cdp.evaluate(`
-                (() => {
-                  const stopBtn = document.querySelector("[data-testid*='stop'], button[aria-label*='停止'], .stop-button");
-                  if (stopBtn && !stopBtn.disabled) {
-                    stopBtn.click();
-                    return { ok: true, via: 'cdp-button' };
-                  }
-                  return { ok: false };
-                })()
-              `);
-              if (r && r.ok) return ok({ stopped: true, via: 'cdp-stop-button' });
-            } catch (_) {}
+        const sent = await agent.send(args, ctx);
+        if (sent.verified && tasksEnabled) {
+          try {
+            const task = tasks.create({ sessionId: sent.sessionId, afterMessageId: sent.messageId, messagePreview: args.message.slice(0, 80) });
+            sent.taskId = task.taskId;
+          } catch {
+            sent.note = '消息已入库。请用 minimax_agent 查询结果';
           }
-          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-          gui.pressKey('escape');
-          return ok({ stopped: true, via: 'escape' });
         }
-
-        if (action === 'result') {
-          let sid = null;
-          let fallback = false;
-          if (args.sessionId || args.session) {
-            sid = db.resolveSession(args.sessionId || args.session);
-            if (!sid) return fail(`找不到会话: ${args.sessionId || args.session}`);
-          } else {
-            const recent = db.recentlyTouchedSessions(1)[0] || db.listSessions(1)[0];
-            if (!recent) return fail('找不到会话');
-            sid = recent.sessionId;
-            fallback = true;
-          }
-          const after = Number(args.afterMessageId || 0);
-          const timeout = args.timeoutSeconds !== undefined ? Number(args.timeoutSeconds) : 0;
-          const out = await db.waitForResult(sid, after, timeout, 3000, ctx && ctx.shouldStop);
-          if (fallback) out.note = '没指定 sessionId，用的是最近活跃会话；要精确请显式传 sessionId';
-          return ok(out);
-        }
-
-        if (action === 'send') {
-          const messageText = args.message || args.text || args.content;
-          if (!messageText) return fail('action=send 时 message 不能为空');
-
-          const quietSeconds = args.quietSeconds === undefined ? 300 : Number(args.quietSeconds);
-          const force = args.force === true;
-          let atParsed = null;
-          if (args.at !== undefined && args.at !== null) {
-            atParsed = parseAt(args.at);
-            if (!atParsed) return fail(`at 坐标格式不正确: "${args.at}"，期望 "x,y" 格式如 "640,880"`);
-          }
-
-          // 目标会话切换（若显式指定 sessionId 或 newSession）
-          const targetSid = (args.sessionId || args.session) ? db.resolveSession(args.sessionId || args.session) : null;
-          if (await cdp.isAvailable()) {
-            if (targetSid) {
-              await cdp.switchSession(targetSid);
-            } else if (args.newSession === true) {
-              await cdp.newTask();
-            }
-          }
-
-          // 预览模式：只报告会发生什么，不点、不粘、不发。只读，所以不受守卫限制。
-          if (args.preview === true) {
-            const busy = guardCandidates()
-              .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
-              .filter((s) => s.idleSeconds < quietSeconds);
-
-            const win = gui.mainWindow();
-            const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, 'chat');
-
-            return ok({
-              preview: true,
-              wouldSend: args.send === true,
-              via: await cdp.isAvailable() ? 'cdp' : 'gui',
-              inputAt: coords || { via: 'cdp' },
-              targetSessionId: targetSid,
-              newSession: args.newSession === true,
-              overlay: coords ? blockedByOverlay(coords.x, coords.y) : null,
-              activeApp: gui.activeApp(),
-              busySessions: busy.map((s) => ({ sessionId: s.sessionId, title: s.title, idleSeconds: s.idleSeconds, source: s.source })),
-              guard: { busy: busy.length > 0, quietSeconds },
-            });
-          }
-
-          const win = gui.mainWindow();
-          const coords = gui.inputCoords(win, atParsed ? atParsed.text : null, 'chat');
-          if (!coords && !await cdp.isAvailable()) return fail('拿不到 MiniMax 窗口位置且 CDP 未就绪');
-
-          // 守卫：候选会话里有刚动过的就不发，除非显式 force。
-          const busy = guardCandidates()
-            .map((s) => ({ ...s, idleSeconds: Math.round((Date.now() - s.lastActivityMs) / 1000) }))
-            .filter((s) => s.idleSeconds < quietSeconds);
-          if (busy.length > 0 && !force) {
-            const list = busy.map((s) => `${s.sessionId}${s.title ? `（${s.title}）` : ''} ${s.idleSeconds}s 前`).join('；');
-            return fail(
-              `有会话刚还在活动，看起来你正在对话中，已拒绝发送以免打扰：${list}。` +
-              `确认要发就加 force: true；或者调大 quietSeconds（当前 ${quietSeconds}）。`
-            );
-          }
-
-          // 1. 优先走 CDP 零权限高速通道
-          if (!atParsed && await cdp.isAvailable()) {
-            try {
-              await cdp.typeMessage(messageText);
-              if (args.send !== true) {
-                return ok({ sent: false, note: '已通过 CDP 注入未发送；send=true 才会发送', via: 'cdp', sessionId: targetSid });
-              }
-              const before = db.maxMessageId();
-              await cdp.sendMessage();
-              const hit = db.waitForUserMessage(before, messageText);
-              if (hit.ok) {
-                const payload = { sent: true, verified: true, sessionId: hit.sessionId, messageId: hit.messageId, via: 'cdp' };
-                if (tasksEnabled) {
-                  const t = tasks.create({
-                    sessionId: hit.sessionId,
-                    afterMessageId: hit.messageId,
-                    messagePreview: String(messageText).slice(0, 80),
-                  });
-                  payload.taskId = t.taskId;
-                  payload.note = '已创建任务；用 tasks/get 看状态、tasks/result 取结果，完成时会收到 notifications/tasks/status';
-                }
-                return ok(payload);
-              }
-            } catch (_) {}
-          }
-
-          // 2. 降级走 GUI 模拟
-          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-          gui.click(coords.x, coords.y);
-          gui.sleep(300);
-          gui.clipboard(messageText);
-          gui.sleep(100);
-          gui.pressKey('v', ['cmd']);
-          gui.sleep(500);
-          if (args.send !== true) {
-            return ok({ sent: false, note: '已粘贴未发送；send=true 才会发送', inputAt: coords });
-          }
-          const before = db.maxMessageId();
-          gui.pressKey('return');
-          const hit = db.waitForUserMessage(before, messageText);
-          return ok({ sent: true, verified: hit.ok, sessionId: hit.sessionId, messageId: hit.messageId, inputAt: coords });
-        }
-
-        return fail(`未知智能体动作: ${action}`);
+        return ok(sent);
       }
 
       // ---------- 4. MiniMax Bot 团队协同 (minimax_bot) ----------
       case 'minimax_bot': {
         const { botClient } = require('../gateway/bot');
-        const action = args.action || (args.text ? 'send' : (args.target ? 'read' : 'roster'));
+        const { action, target } = args;
 
         if (action === 'roster') {
           return ok(botClient.getRoster());
         }
+        if (action === 'open') return ok(await agent.control(() => botClient.open(args.sessionId, ctx)));
 
-        const targetArg = args.target || args.chatId;
-        const resolved = botClient.resolveTarget(targetArg, args.mode || 'direct');
+        if (action !== 'read' && !target?.trim()) return fail('Bot 写入需要明确的 target，请先用 roster 查看名称或 chatId');
+        const resolved = botClient.resolveTarget(target, args.mode, { exact: action !== 'read' });
 
         if (action === 'read') {
           const res = await botClient.listMessages(resolved.chatId, args.limit || 20);
           return ok({ target: resolved, ...res });
         }
         if (action === 'send') {
-          if (!args.text) return fail('action=send 时 text 不能为空');
+          if (!args.text?.trim()) return fail('send 需要非空 text');
           const sendText = resolved.prefix ? `${resolved.prefix}${args.text}` : args.text;
-          const res = await botClient.sendMessage(resolved.chatId, sendText);
+          const res = await botClient.sendMessage(resolved.chatId, sendText, args.clientMessageId);
           return ok({ target: resolved, text: sendText, ...res });
         }
         if (action === 'cancel') {
@@ -400,104 +237,42 @@ async function dispatch(name, args = {}, ctx = null) {
         return fail(`未知 Bot 操作类型: ${action}`);
       }
 
-      // ---------- 5. 人工问卷与卡片管理 (minimax_questionnaire) ----------
       case 'minimax_questionnaire': {
-        const action = args.action || (args.selections || args.force !== undefined ? 'answer' : (args.requestId || args.id ? 'draft' : 'list'));
-
-        if (action === 'list') {
-          return ok({ pending: db.pending() });
+        if (args.action === 'list') return ok({ pending: db.pending() });
+        if (!args.requestId?.trim()) return fail('answer 需要 requestId');
+        const detail = db.questionnaireDetail(args.requestId);
+        if (!detail) return fail('找不到提问: ' + args.requestId);
+        if (detail.status !== 'pending') {
+          if (!args.preview) return fail('提问状态为 ' + detail.status + '，无法提交');
+          return ok({ preview: true, requestId: detail.requestId, status: detail.status, answered: detail.answered });
         }
 
-        const reqId = args.requestId || args.id;
-        if (!reqId) return fail('action=draft 或 answer 时缺少 requestId');
+        const suggestion = db.suggestAnswer(detail);
+        const response = {
+          requestId: detail.requestId, sessionId: detail.sessionId, title: detail.title, status: detail.status,
+          steps: detail.steps, suggestion,
+        };
+        const raw = args.selections ?? qn.fromSuggestion(suggestion);
+        const { answers, errors } = qn.normalizeSelections(detail, raw);
+        if (errors.length || !answers.length) {
+          if (args.preview && args.selections === undefined) return ok({ ...response, preview: true, selectionErrors: errors });
+          return fail(errors.join('\n') || '请提供问卷答案');
+        }
 
-        const detail = db.questionnaireDetail(reqId);
-        if (!detail) return fail(`找不到提问: ${reqId}`);
-
-        if (action === 'draft') {
-          if (detail.status !== 'pending') {
-            return ok({
-              requestId: detail.requestId,
-              status: detail.status,
-              note: `这条提问已经是 ${detail.status}，不用再答`,
-              answered: detail.answered,
-            });
-          }
-          const suggestion = db.suggestAnswer(detail);
+        if (args.preview) {
           return ok({
-            requestId: detail.requestId,
-            sessionId: detail.sessionId,
-            title: detail.title,
-            steps: detail.steps,
-            suggestion,
-            note: '以上是草稿。要提交用 action="answer"，默认也只 preview。',
+            ...response, preview: true,
+            wouldSubmit: qn.buildReplyPayload(detail, answers),
+            clickPlan: qn.clickPlan(detail, answers),
           });
         }
-
-        if (action === 'answer') {
-          if (detail.status !== 'pending') return fail(`这条提问已经是 ${detail.status}，不能再答`);
-          const suggestion = db.suggestAnswer(detail);
-          const raw = Array.isArray(args.selections) && args.selections.length
-            ? args.selections
-            : qn.fromSuggestion(suggestion);
-          const { answers, errors } = qn.normalizeSelections(detail, raw);
-          if (errors.length) return fail(`答案有问题，未提交：\n- ${errors.join('\n- ')}`);
-          if (!answers.length) return fail('这条提问解析不出任何可答的步骤，拒绝提交空答案。');
-
-          const payload = qn.buildReplyPayload(detail, answers);
-          const plan = qn.clickPlan(detail, answers);
-
-          if (args.preview !== false) {
-            return ok({
-              preview: true,
-              requestId: detail.requestId,
-              sessionId: detail.sessionId,
-              title: detail.title,
-              wouldSubmit: payload,
-              clickPlan: plan,
-              steps: detail.steps,
-              note: 'preview 模式未实际提交。确认提交加 preview:false, force:true。',
-            });
-          }
-
-          if (args.force !== true) return fail('这是在替用户做决定。确认要提交就显式加 force:true');
-          if (!gui.ensureFront()) return fail('MiniMax 不是活跃应用，已放弃操作');
-          const win = gui.mainWindow();
-          if (!win) return fail('找不到 MiniMax 窗口');
-          const region = { x: win.x, y: win.y, width: win.width, height: win.height };
-
-          const clicked = [];
-          for (const step of plan) {
-            const hit = ocr.find(step.anchor, { region, refresh: true, mode: 'contains' })?.picked;
-            if (hit) {
-              gui.click(hit.cx, hit.cy);
-              clicked.push({ stepId: step.stepId, at: [hit.cx, hit.cy] });
-              gui.sleep(500);
-            }
-          }
-
-          const submitHit = ocr.find('确定', { region, refresh: true, mode: 'exact' })?.picked
-            || ocr.find('提交', { region, refresh: true, mode: 'exact' })?.picked;
-          if (submitHit) {
-            gui.click(submitHit.cx, submitHit.cy);
-            gui.sleep(1000);
-          }
-
-          const after = db.questionnaireDetail(detail.requestId);
-          return ok({
-            submitted: true,
-            verified: Boolean(after && after.status !== 'pending'),
-            status: after?.status || 'unknown',
-            clicked,
-          });
-        }
-
-        return fail(`未知问卷操作: ${action}`);
+        if (!args.force) return fail('问卷提交需要 preview:false 和 force:true');
+        return ok(await questions.submit(detail, answers, ctx));
       }
 
       // ---------- 6. 桌面环境与窗口控制 (minimax_desktop) ----------
       case 'minimax_desktop': {
-        const action = args.action || (args.mode || args.width ? 'screenshot' : (args.windows ? 'windows' : 'activate'));
+        const { action } = args;
 
         if (action === 'windows') {
           const onScreen = gui.appWindows();
@@ -534,60 +309,18 @@ async function dispatch(name, args = {}, ctx = null) {
         }
 
         if (action === 'activate') {
+          let debug;
           if (args.relaunchWithDebug) {
             const { launchWithDebug } = require(path.join(__dirname, '..', '..', 'scripts', 'launch-with-debug'));
-            const r = await launchWithDebug();
-            if (!r.ok) return fail(`挂载调试端口重启失败: ${r.error}`);
-            return ok({ relaunchWithDebug: true, cdp: r, window: gui.mainWindow() });
+            debug = await launchWithDebug();
+            if (!debug.ok) return fail(`挂载调试端口重启失败: ${debug.error}`);
           }
-          if (await cdp.isAvailable()) {
-            try {
-              const r = await cdp.bringToFront();
-              if (r && r.ok) return ok({ via: 'cdp', note: '已通过 CDP 将 MiniMax 唤醒至前台' });
-            } catch (_) {}
-          }
-          gui.openApp();
-          return ok({ via: 'gui-open', window: gui.mainWindow() });
+          const activated = await agent.activate(ctx);
+          return debug ? ok({ ...activated, relaunchWithDebug: true, cdp: debug, window: gui.mainWindow() }) : ok(activated);
         }
 
         return fail(`未知桌面操作: ${action}`);
       }
-
-      // ---------- 7. 遗留别名透明映射 (Backward Compatibility) ----------
-      case 'minimax_list_sessions':
-        return await dispatch('minimax_session', { action: 'list', ...args }, ctx);
-      case 'minimax_read_session':
-        return await dispatch('minimax_session', { action: 'read', ...args }, ctx);
-      case 'minimax_tail_sessions':
-        return await dispatch('minimax_session', { action: 'tail', ...args }, ctx);
-      case 'minimax_search':
-        return await dispatch('minimax_session', { action: 'search', ...args }, ctx);
-      case 'minimax_send_message':
-        return await dispatch('minimax_agent', { action: 'send', ...args }, ctx);
-      case 'minimax_get_result':
-        return await dispatch('minimax_agent', { action: 'result', ...args }, ctx);
-      case 'minimax_stop_generation':
-        return await dispatch('minimax_agent', { action: 'stop', ...args }, ctx);
-      case 'minimax_new_task':
-        return await dispatch('minimax_agent', { action: 'new', ...args }, ctx);
-      case 'minimax_bot_roster':
-        return await dispatch('minimax_bot', { action: 'roster', ...args }, ctx);
-      case 'minimax_bot_message':
-        return await dispatch('minimax_bot', { action: args.action || (args.text ? 'send' : 'read'), ...args }, ctx);
-      case 'minimax_bot_turn':
-        return await dispatch('minimax_bot', args, ctx);
-      case 'minimax_pending':
-        return await dispatch('minimax_questionnaire', { action: 'list', ...args }, ctx);
-      case 'minimax_draft_answer':
-        return await dispatch('minimax_questionnaire', { action: 'draft', ...args }, ctx);
-      case 'minimax_answer_question':
-        return await dispatch('minimax_questionnaire', { action: 'answer', ...args }, ctx);
-      case 'minimax_activate':
-        return await dispatch('minimax_desktop', { action: 'activate', ...args }, ctx);
-      case 'minimax_screenshot':
-        return await dispatch('minimax_desktop', { action: 'screenshot', ...args }, ctx);
-      case 'minimax_windows':
-        return await dispatch('minimax_desktop', { action: 'windows', ...args }, ctx);
 
       default:
         return fail(`未知工具: ${name}`);
@@ -597,127 +330,190 @@ async function dispatch(name, args = {}, ctx = null) {
   }
 }
 
-const LEGACY_MAP = {
-  minimax_list_sessions: (a) => ({ name: 'minimax_session', args: { action: 'list', ...a } }),
-  minimax_read_session: (a) => ({ name: 'minimax_session', args: { action: 'read', ...a } }),
-  minimax_tail_sessions: (a) => ({ name: 'minimax_session', args: { action: 'tail', ...a } }),
-  minimax_search: (a) => ({ name: 'minimax_session', args: { action: 'search', ...a } }),
-  minimax_send_message: (a) => ({ name: 'minimax_agent', args: { action: 'send', ...a } }),
-  minimax_get_result: (a) => ({ name: 'minimax_agent', args: { action: 'result', ...a } }),
-  minimax_stop_generation: (a) => ({ name: 'minimax_agent', args: { action: 'stop', ...a } }),
-  minimax_new_task: (a) => ({ name: 'minimax_agent', args: { action: 'new', ...a } }),
-  minimax_bot_roster: (a) => ({ name: 'minimax_bot', args: { action: 'roster', ...a } }),
-  minimax_bot_message: (a) => ({ name: 'minimax_bot', args: { action: a.action || (a.text ? 'send' : 'read'), ...a } }),
-  minimax_bot_turn: (a) => ({ name: 'minimax_bot', args: a }),
-  minimax_pending: (a) => ({ name: 'minimax_questionnaire', args: { action: 'list', ...a } }),
-  minimax_draft_answer: (a) => ({ name: 'minimax_questionnaire', args: { action: 'draft', ...a } }),
-  minimax_answer_question: (a) => ({ name: 'minimax_questionnaire', args: { action: 'answer', ...a } }),
-  minimax_activate: (a) => ({ name: 'minimax_desktop', args: { action: 'activate', ...a } }),
-  minimax_screenshot: (a) => ({ name: 'minimax_desktop', args: { action: 'screenshot', ...a } }),
-  minimax_windows: (a) => ({ name: 'minimax_desktop', args: { action: 'windows', ...a } }),
+// Legacy names and parameters stay callable without appearing in tools/list.
+const LEGACY_TOOLS = {
+  minimax_list_sessions: ['minimax_session', 'list'],
+  minimax_read_session: ['minimax_session', 'read'],
+  minimax_tail_sessions: ['minimax_session', 'tail'],
+  minimax_search: ['minimax_session', 'search'],
+  minimax_send_message: ['minimax_agent', 'send'],
+  minimax_get_result: ['minimax_agent', 'result'],
+  minimax_stop_generation: ['minimax_agent', 'stop'],
+  minimax_new_task: ['minimax_agent', 'new'],
+  minimax_bot_roster: ['minimax_bot', 'roster'],
+  minimax_bot_message: ['minimax_bot'],
+  minimax_bot_turn: ['minimax_bot'],
+  minimax_pending: ['minimax_questionnaire', 'list'],
+  minimax_draft_answer: ['minimax_questionnaire', 'draft'],
+  minimax_answer_question: ['minimax_questionnaire', 'answer'],
+  minimax_activate: ['minimax_desktop', 'activate'],
+  minimax_screenshot: ['minimax_desktop', 'screenshot'],
+  minimax_windows: ['minimax_desktop', 'windows'],
 };
 
-/**
- * 对外入口：参数归一化、Schema 校验、分发与审计。
- */
+const ALIASES = {
+  minimax_session: { session: 'sessionId', q: 'query' },
+  minimax_agent: { session: 'sessionId', text: 'message', content: 'message' },
+  minimax_bot: { chatId: 'target' },
+  minimax_questionnaire: { id: 'requestId' },
+};
+
+function normalizeArgs(name, args, legacyAction, callerName) {
+  if (args.action !== undefined && typeof args.action !== 'string') return ['action 必须是字符串'];
+  const errors = [];
+  for (const [alias, canonical] of Object.entries(ALIASES[name] || {})) {
+    if (!Object.hasOwn(args, alias)) continue;
+    const value = args[alias];
+    if (typeof value !== 'string') {
+      errors.push(alias + ' 必须是字符串');
+    } else if (args[canonical] === undefined) {
+      args[canonical] = value;
+    } else if (args[canonical] !== value) {
+      errors.push(`参数 ${canonical} 和旧别名 ${alias} 的值冲突，请只保留 ${canonical}`);
+    }
+    delete args[alias];
+  }
+  if (errors.length) return errors;
+  if (legacyAction) {
+    if (args.action !== undefined && args.action !== legacyAction) {
+      return ['该旧工具名只支持 action=' + legacyAction];
+    }
+    args.action = legacyAction;
+  }
+
+  switch (name) {
+    case 'minimax_session':
+      if (args.count !== undefined && (!Number.isInteger(args.count) || args.count < 1 || args.count > 20)) {
+        return ['count 必须是 1 到 20 的整数'];
+      }
+      if (args.action === 'tail' || (args.action === undefined && args.count !== undefined &&
+          args.sessionId === undefined && args.query === undefined)) {
+        args.action = 'list';
+        args.limit = args.count ?? args.limit ?? 3;
+        args.perSession ??= 2;
+      }
+      delete args.count;
+      args.action ??= args.sessionId !== undefined ? 'read' : args.query !== undefined ? 'search' : 'list';
+      break;
+    case 'minimax_agent':
+      args.action ??= args.message !== undefined || args.send === true || args.newSession === true ? 'send' : 'result';
+      if (args.preview === true && args.action !== 'send') return ['preview 仅用于 send'];
+      if (args.action === 'stop' && args.sessionId === undefined && callerName !== 'minimax_stop_generation') {
+        return ['stop 需要目标 sessionId'];
+      }
+      break;
+    case 'minimax_bot':
+      if (args.action === 'resume_pending') args.action = 'resume';
+      args.action ??= args.text !== undefined ? 'send' : args.target !== undefined || callerName === 'minimax_bot_message' ? 'read' : 'roster';
+      if (args.action === 'answer' && args.answers && typeof args.answers === 'object' && !Array.isArray(args.answers)) {
+        args.answers = Object.entries(args.answers).map(([stepId, value]) => ({
+          stepId,
+          selectedOptionIds: typeof value === 'string' ? [value] : value,
+        }));
+      }
+      break;
+    case 'minimax_questionnaire':
+      if (args.action === 'draft') {
+        args.action = 'answer';
+        args.preview = true;
+      }
+      args.action ??= args.requestId !== undefined || args.selections !== undefined || args.preview === false ? 'answer' : 'list';
+      if (Array.isArray(args.selections)) {
+        args.selections = args.selections.map((selection) => {
+          if (!selection || typeof selection !== 'object' || Array.isArray(selection)) return selection;
+          const { selectedOptionIds, ...rest } = selection;
+          if (rest.optionIds === undefined && selectedOptionIds !== undefined) rest.optionIds = selectedOptionIds;
+          if (rest.selectedOther === true && rest.optionIds === undefined) rest.optionIds = [];
+          return rest;
+        });
+      }
+      break;
+    case 'minimax_desktop':
+      args.action ??= args.mode !== undefined || args.width !== undefined ? 'screenshot' : 'activate';
+      break;
+  }
+  return errors;
+}
+
+const TOOL_BY_NAME = new Map(ALL_TOOLS.map((tool) => [tool.name, tool]));
+const LEGACY_AGENT_FIELDS = { at: { type: 'string' }, quietSeconds: { type: 'integer', minimum: 0 } };
+
+function auditLevel(name, args) {
+  switch (name) {
+    case 'minimax_agent':
+      if (args.action === 'result' || (args.action === 'send' && args.preview)) return 'read';
+      return args.action === 'send' && args.send ? 'commit' : 'ui';
+    case 'minimax_bot':
+      if (['roster', 'read'].includes(args.action)) return 'read';
+      return args.action === 'open' ? 'ui' : 'commit';
+    case 'minimax_questionnaire':
+      return args.action === 'list' || args.preview ? 'read' : 'commit';
+    case 'minimax_desktop':
+      return args.action === 'windows' ? 'read' : 'ui';
+    case 'minimax_watch':
+      return args.action === 'status' || (args.action === 'config' && !args.policy) ||
+        ((args.action ?? 'tick') === 'tick' && args.dryRun) ? 'read' : 'commit';
+    default:
+      return ann.levelOf(name);
+  }
+}
+
 async function callTool(name, args = {}, ctx = null) {
   const started = Date.now();
   const callerName = name;
+  const legacy = Object.hasOwn(LEGACY_TOOLS, name) ? LEGACY_TOOLS[name] : null;
+  if (legacy) [name] = legacy;
+  const tool = TOOL_BY_NAME.get(name);
+  if (!tool) return fail('未知工具: ' + name);
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return fail('参数必须是对象');
 
-  if (LEGACY_MAP[name]) {
-    const mapped = LEGACY_MAP[name](args);
-    name = mapped.name;
-    args = mapped.args;
-  }
+  args = { ...args };
+  const normalizationErrors = normalizeArgs(name, args, legacy?.[1], callerName);
+  if (normalizationErrors.length) return fail(normalizationErrors.join('\n'));
+  const schema = name === 'minimax_agent'
+    ? { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, ...LEGACY_AGENT_FIELDS } }
+    : tool.inputSchema;
+  const validation = validateArgs({ inputSchema: schema }, args);
+  if (!validation.ok) return fail('参数不合法，未执行：\n- ' + validation.errors.join('\n- '));
+  args = validation.args;
 
-  // 入参别名按工具精准归一化
-  if (args && typeof args === 'object') {
-    if (name === 'minimax_session') {
-      if (args.sessionId && !args.session) args.session = args.sessionId;
-      if (args.q && !args.query) args.query = args.q;
-      if (!args.action) {
-        if (args.session || args.sessionId) args.action = 'read';
-        else if (args.query || args.q) args.action = 'search';
-        else if (args.count || args.perSession) args.action = 'tail';
-        else args.action = 'list';
-      }
-    } else if (name === 'minimax_agent') {
-      if (args.text && !args.message) args.message = args.text;
-      if (args.content && !args.message) args.message = args.content;
-      if (args.session && !args.sessionId) args.sessionId = args.session;
-      if (!args.action) {
-        if (args.message || args.text || args.content) args.action = 'send';
-        else if (args.afterMessageId || args.timeoutSeconds !== undefined) args.action = 'result';
-        else args.action = 'send';
-      }
-    } else if (name === 'minimax_bot') {
-      if (args.chatId && !args.target) args.target = args.chatId;
-      if (args.target && !args.chatId) args.chatId = args.target;
-      if (!args.action) {
-        if (args.text) args.action = 'send';
-        else if (args.target) args.action = 'read';
-        else args.action = 'roster';
-      }
-    } else if (name === 'minimax_questionnaire') {
-      if (args.id && !args.requestId) args.requestId = args.id;
-      if (!args.action) {
-        if (args.selections || args.force !== undefined) args.action = 'answer';
-        else if (args.requestId || args.id) args.action = 'draft';
-        else args.action = 'list';
-      }
-    } else if (name === 'minimax_desktop') {
-      if (!args.action) {
-        if (args.mode || args.width) args.action = 'screenshot';
-        else if (args.relaunchWithDebug !== undefined) args.action = 'activate';
-        else args.action = 'activate';
-      }
-    }
-  }
-
-  // 工具 Schema 校验
-  const tool = ALL_TOOLS.find((t) => t.name === name);
-  if (tool) {
-    const v = validateArgs(tool, args);
-    if (!v.ok) {
-      return fail(`参数不合法，未执行：\n- ${v.errors.join('\n- ')}`);
-    }
-    args = v.args;
-  }
-
-  let result;
-  try {
-    result = await dispatch(name, args, ctx);
-  } catch (err) {
-    const auditTool = ann.needsAudit(callerName) ? callerName : name;
-    if (ann.needsAudit(auditTool)) {
-      audit.record({
-        tool: auditTool,
-        level: ann.levelOf(auditTool),
-        args,
-        ok: false,
-        ms: Date.now() - started,
-        error: err && err.message ? err.message : String(err),
-      });
-    }
-    throw err;
-  }
-  const auditTool = ann.needsAudit(callerName) ? callerName : name;
-  if (ann.needsAudit(auditTool)) {
-    const payload = parsePayload(result);
-    audit.record({
-      tool: auditTool,
-      level: ann.levelOf(auditTool),
-      args,
-      ok: result && result.isError !== true,
-      ms: Date.now() - started,
-      target: payload && (payload.at || payload.clicked || payload.sessionId)
-        ? { at: payload.at, clicked: payload.clicked, sessionId: payload.sessionId }
-        : undefined,
-      error: result && result.isError === true ? (payload && payload.error) : undefined,
+  const level = auditLevel(name, args);
+  const operationId = level === 'commit' ? audit.admit({ tool: callerName, level, args }) : null;
+  if (level === 'commit' && !operationId) {
+    return fail('审计日志不可写，已阻止提交。修复本地审计日志后再调用。', {
+      code: 'AUDIT_UNAVAILABLE',
+      executed: false,
     });
   }
+
+  const result = await dispatch(name, args, ctx);
+  if (level !== 'read') {
+    const payload = parsePayload(result);
+    const recorded = audit.record({
+      tool: callerName, level, args, ms: Date.now() - started,
+      ...(operationId ? { phase: 'outcome', operationId } : {}),
+      ok: result.isError !== true && payload?.verified !== false,
+      target: payload && (payload.inputAt || payload.clicked || payload.sessionId)
+        ? { at: payload.inputAt, clicked: payload.clicked, sessionId: payload.sessionId }
+        : undefined,
+      error: result.isError ? payload?.error : undefined,
+    });
+    if (operationId && !recorded) {
+      // A driver may already have committed the action. Preserve its outcome
+      // and expose the audit failure without telling the caller to retry.
+      return {
+        ...result,
+        content: [{ type: 'text', text: JSON.stringify({
+          ...payload, audit: { state: 'outcome-unavailable', operationId },
+        }) }],
+      };
+    }
+  }
   return result;
-  return result;
+}
+
+function isKnownTool(name) {
+  return TOOL_BY_NAME.has(name) || Object.hasOwn(LEGACY_TOOLS, name);
 }
 
 function parsePayload(result) {
@@ -728,4 +524,4 @@ function parsePayload(result) {
   }
 }
 
-module.exports = { callTool, READONLY, setTasksEnabled };
+module.exports = { callTool, isKnownTool, READONLY, setTasksEnabled };

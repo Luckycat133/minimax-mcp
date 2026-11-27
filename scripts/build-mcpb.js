@@ -29,6 +29,7 @@ const COPY = [
   'AGENTS.md',
   'glama.json',
   'src',
+  'scripts/launch-with-debug.js',
   'scripts/mac_gui.py',
   'skills',
 ];
